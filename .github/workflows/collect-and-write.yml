@@ -1,0 +1,287 @@
+name: Collect and write
+
+# 本仓库是公开的，只放这一个 workflow；内容全在私有仓库（vars.CONTENT_REPO）。
+# 运行时用 CONTENT_REPO_TOKEN checkout 私有仓库 → 采集 → OpenCode 写稿 → 校验 → 向私有仓库开 PR 并合并。
+#
+# 公开仓库的日志与 artifact 谁都能看，所以：
+#   - 会打印正文/文件名的命令，输出一律重定向到 $PRIV（runner 临时目录），日志里只写通过/失败；
+#   - artifact 用 ARTIFACT_PASSPHRASE 加密后才上传，没配口令就不上传；
+#   - 只允许 schedule / workflow_dispatch 触发，不接任何 PR 事件（fork 拿不到 secrets，也碰不到这里）。
+# 禁止 wewrite publish。
+
+on:
+  schedule:
+    # 每天北京时间 03:47（UTC 前一日 19:47）。错开整点，GitHub 整点排队最堵。
+    - cron: "47 19 * * *"
+  workflow_dispatch:
+    inputs:
+      fetch_only:
+        description: "只抓材料不写稿：结果只进加密 artifact，不建分支"
+        type: boolean
+        default: false
+      news_id:
+        description: "指定 Wowhead 新闻 ID，多条用逗号分隔（可选）"
+        type: string
+        default: ""
+      limit:
+        description: "本轮最多写几篇；0 = 未用的全部写完"
+        type: string
+        default: "1"
+      no_pr:
+        description: "只跑不交付：不推 auto/ 分支、不开 PR（结果在加密 artifact 里）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: collect-and-write
+  cancel-in-progress: false
+
+jobs:
+  collect-write:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      CONTENT_REPO: ${{ vars.CONTENT_REPO }}
+      FETCH_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.fetch_only || false }}
+      NO_PR: ${{ github.event_name == 'workflow_dispatch' && inputs.no_pr || false }}
+      NEWS_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.news_id || '' }}
+      MAX_ARTICLES: ${{ github.event_name == 'workflow_dispatch' && inputs.limit || vars.MAX_ARTICLES || '5' }}
+      WEWRITE_HOME: ${{ github.workspace }}/.wewrite
+    steps:
+      - name: Preflight
+        env:
+          TOKEN: ${{ secrets.CONTENT_REPO_TOKEN }}
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+        run: |
+          set -euo pipefail
+          miss=""
+          [ -n "${CONTENT_REPO}" ] || miss="$miss vars.CONTENT_REPO"
+          [ -n "${TOKEN}" ] || miss="$miss secrets.CONTENT_REPO_TOKEN"
+          if [ "${FETCH_ONLY}" != "true" ] && [ -z "${ZHIPU_API_KEY}" ]; then miss="$miss secrets.ZHIPU_API_KEY"; fi
+          if [ -n "$miss" ]; then
+            echo "::error::缺少配置：$miss（Settings → Secrets and variables → Actions）"
+            exit 1
+          fi
+          PRIV="${RUNNER_TEMP}/private"
+          mkdir -p "$PRIV"
+          echo "PRIV=${PRIV}" >> "$GITHUB_ENV"
+
+      - name: Checkout content repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.CONTENT_REPO }}
+          token: ${{ secrets.CONTENT_REPO_TOKEN }}
+          ref: main
+          fetch-depth: 0
+          # 不把 token 留在 .git/config 里：写稿 agent 在这个目录里跑，推送时再临时带上
+          persist-credentials: false
+
+      - name: Create auto branch
+        env:
+          TOKEN: ${{ secrets.CONTENT_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          DAY=$(TZ=Asia/Shanghai date +%F)
+          BR="auto/${DAY}"
+          if git ls-remote --exit-code --heads "https://x-access-token:${TOKEN}@github.com/${CONTENT_REPO}.git" "$BR" >/dev/null 2>&1; then
+            BR="auto/${DAY}-r${{ github.run_number }}"
+          fi
+          git checkout -q -b "$BR"
+          echo "DAY=${DAY}" >> "$GITHUB_ENV"
+          echo "AUTO_BRANCH=${BR}" >> "$GITHUB_ENV"
+          echo "base main=$(git rev-parse --short HEAD) → ${BR}"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: |
+          set -euo pipefail
+          python -m pip install -q --upgrade pip
+          pip install -q -r pipeline/requirements.txt
+          if [ "${FETCH_ONLY}" != "true" ]; then
+            pip install -q wewrite
+            H="${WEWRITE_HOME}"
+            mkdir -p "$H/themes" "$H/corpus" "$H/lessons"
+            ln -sf "${GITHUB_WORKSPACE}/config/style.yaml" "$H/style.yaml"
+            ln -sf "${GITHUB_WORKSPACE}/config/wow-theme.yaml" "$H/themes/wow-theme.yaml"
+            [ -f "$H/history.yaml" ] || printf 'version: 1\narticles: []\n' > "$H/history.yaml"
+            { wewrite home; wewrite diagnose --json || true; } > "$PRIV/install.log" 2>&1
+          fi
+          echo "依赖已装好"
+
+      - name: Fetch materials (no writing)
+        if: env.FETCH_ONLY == 'true'
+        run: |
+          set -euo pipefail
+          rc=0
+          {
+            python articles/wh_fetch.py list --category Forever --json
+            python pipeline/fetch_materials.py --limit "${MAX_ARTICLES}"
+          } > "$PRIV/fetch.log" 2>&1 || rc=$?
+          echo "### 抓材料结束（退出码 $rc），结果在加密 artifact 里" >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+
+      - name: Install OpenCode CLI
+        if: env.FETCH_ONLY != 'true'
+        run: |
+          curl -fsSL https://opencode.ai/install | bash > "$PRIV/opencode-install.log" 2>&1
+          echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
+
+      - name: OpenCode agent
+        if: env.FETCH_ONLY != 'true'
+        timeout-minutes: 150
+        env:
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          OPENCODE_MODEL: ${{ vars.ZHIPU_OPENCODE_MODEL || 'zhipu/glm-5.3-flash' }}
+          PROMPT: |
+            按仓库 pipeline/gha-agent-brief.md 执行 WeWrite 写稿。
+
+            本轮：NEWS_ID=${{ env.NEWS_ID }}  MAX_ARTICLES=${{ env.MAX_ARTICLES }}  日期=${{ env.DAY }}
+
+            先 Read pipeline/gha-agent-brief.md 和 skills/wewrite/SKILL.md。
+            wewrite 的 {home} = $WEWRITE_HOME = 仓库内 .wewrite/（style.yaml 已就位，来自 config/style.yaml），不要去 ~/.wewrite，不要走 onboard。
+            临时文件放 pipeline/runs/ 或 .wewrite/ 下，不要写仓库外的目录。
+            选题只用两条通道：articles/bz_fetch.py（官方站，优先）和 articles/wh_fetch.py（Wowhead，官方没有的内容），各 list 一遍再定。不要用 websearch。
+            禁止 wewrite publish。没有未用新闻就结束、不要改无关文件。
+            只改工作区文件：articles/、pipeline/pending_publish.yaml、pipeline/runs/。
+            不要 git commit、不要 git push、不要开 PR；提交由后面的 workflow step 做。
+        run: |
+          set -euo pipefail
+          opencode --version
+          rc=0
+          opencode run --model "${OPENCODE_MODEL}" --print-logs "${PROMPT}" > "$PRIV/opencode.log" 2>&1 || rc=$?
+          echo "opencode 退出码 $rc，日志 $(wc -l < "$PRIV/opencode.log") 行（在加密 artifact 里）"
+          exit $rc
+
+      - name: Gate - paths and article checks
+        if: env.FETCH_ONLY != 'true'
+        run: |
+          # 闸门逻辑与此前在私有仓库时相同；输出含文件名和正文片段，全部进 gate.log
+          bash -euo pipefail > "$PRIV/gate.log" 2>&1 <<'GATE' || { echo "::error::闸门未过，不开 PR（原因见加密 artifact 里的 gate.log）"; exit 1; }
+          # 1) 只允许动这三处
+          BAD=$(git -c core.quotepath=off status --porcelain --untracked-files=all \
+            | awk '{print $NF}' \
+            | grep -vE '^(articles/|pipeline/pending_publish\.yaml$|pipeline/runs/)' || true)
+          if [ -n "$BAD" ]; then
+            echo "Agent 改动了允许范围以外的文件："
+            echo "$BAD"
+            exit 1
+          fi
+          # 2) 安全闸不许被打开
+          if grep -qE '^auto_publish:\s*true' pipeline/pending_publish.yaml; then
+            echo "pending_publish.yaml 的 auto_publish 被改成了 true"
+            exit 1
+          fi
+          # 3) 待推队列的摘要不超过 120 字（按字数，不是字节）
+          python3 - <<'EOF'
+          import sys, yaml
+          d = yaml.safe_load(open("pipeline/pending_publish.yaml", encoding="utf-8")) or {}
+          bad = [(i.get("series_no"), len(i.get("digest") or "")) for i in d.get("items") or []
+                 if len(i.get("digest") or "") > 120]
+          for no, n in bad:
+              print(f"第 {no} 篇摘要 {n} 字，超过 120 字")
+          sys.exit(1 if bad else 0)
+          EOF
+          # 4) 新成稿逐篇过审核脚本（不信 Agent 自报）
+          NEW=$(git ls-files --others --exclude-standard 'articles/[0-9][0-9]-*.md' || true)
+          {
+            echo "NEW_ARTICLES<<EOF"
+            echo "$NEW"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
+          if [ -z "$NEW" ]; then
+            echo "没有新成稿"
+            exit 0
+          fi
+          python3 tools/lint.py --changed
+          GATE
+          echo "闸门通过"
+
+      - name: Encrypt and upload artifact
+        if: always()
+        env:
+          PASS: ${{ secrets.ARTIFACT_PASSPHRASE }}
+        run: |
+          set -uo pipefail
+          if [ -z "${PASS}" ]; then
+            echo "::warning::未配置 ARTIFACT_PASSPHRASE，跳过 artifact（公开仓库不上传明文）"
+            exit 0
+          fi
+          cd "${GITHUB_WORKSPACE}" 2>/dev/null || exit 0
+          mkdir -p _bundle
+          [ -d "$PRIV" ] && cp -r "$PRIV" _bundle/logs
+          LIST="_bundle"
+          for p in pipeline/pending_publish.yaml pipeline/runs pipeline/materials articles/images \
+                   articles/used_news.yaml articles/source_links.json articles/index.html articles/glossary.md \
+                   articles/[0-9][0-9]-*.md articles/[0-9][0-9]-preview.html; do
+            [ -e "$p" ] && LIST="$LIST $p"
+          done
+          mkdir -p "${RUNNER_TEMP}/out"
+          # shellcheck disable=SC2086
+          tar czf - $LIST 2>/dev/null \
+            | openssl enc -aes-256-cbc -md sha256 -pbkdf2 -iter 200000 -salt -pass env:PASS \
+              -out "${RUNNER_TEMP}/out/run-${{ github.run_number }}.tar.gz.enc"
+          rm -rf _bundle
+          echo "已加密：$(du -h "${RUNNER_TEMP}/out/run-${{ github.run_number }}.tar.gz.enc" | cut -f1)"
+
+      - name: Upload encrypted artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-run-${{ github.run_number }}
+          path: ${{ runner.temp }}/out/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Push auto branch and open PR
+        if: env.FETCH_ONLY != 'true' && env.NO_PR != 'true'
+        env:
+          TOKEN: ${{ secrets.CONTENT_REPO_TOKEN }}
+          GH_TOKEN: ${{ secrets.CONTENT_REPO_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          for f in $NEW_ARTICLES; do
+            no=$(basename "$f" | cut -c1-2 | sed 's/^0//')
+            python3 pipeline/eventlog.py --actor gha --run-id "${{ github.run_id }}" \
+              --stage written --series "$no" \
+              --field model="${{ vars.ZHIPU_OPENCODE_MODEL || 'zhipu/glm-5.3-flash' }}" \
+              --field file="$(basename "$f")" --field branch="${AUTO_BRANCH}" --field checks=pass \
+              >/dev/null
+          done
+          for pth in articles pipeline/pending_publish.yaml pipeline/runs pipeline/events; do
+            [ -e "$pth" ] && git add "$pth"
+          done
+          if git diff --cached --quiet; then
+            echo "### 本轮没有新成稿，未建分支" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          LIST=$(echo "$NEW_ARTICLES" | sed '/^$/d; s#^articles/#- #')
+          git commit -q -m "auto: ${DAY} 新成稿（run ${{ github.run_number }}）"
+          git push -q "https://x-access-token:${TOKEN}@github.com/${CONTENT_REPO}.git" "HEAD:${AUTO_BRANCH}" 2>/dev/null
+          CHECKLIST=$(python3 tools/lint.py $NEW_ARTICLES --checklist 2>/dev/null || true)
+          BODY=$(printf '%s\n\n%s\n\n%s\n\n%s\n' \
+            "OpenCode 自动成稿，已过 tools/lint.py（规则见 rules/registry.yaml）。运行记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            "${LIST:-（无新 md，仅账本/词表改动）}" \
+            "${CHECKLIST}" \
+            "本 PR 由 workflow 自动合并（机器闸门已过）。上面的人审项是事后复查清单——发现问题在 main 上改，或 revert 本次 squash commit。")
+          if URL=$(gh pr create --repo "${CONTENT_REPO}" --base main --head "${AUTO_BRANCH}" \
+                --title "auto: ${DAY} 新成稿" --body "$BODY" 2>"$PRIV/pr.err"); then
+            echo "### PR：${URL}" >> "$GITHUB_STEP_SUMMARY"
+            if gh pr merge "$URL" --repo "${CONTENT_REPO}" --squash --delete-branch \
+                 --subject "auto: ${DAY} 新成稿（run ${{ github.run_number }}）" >/dev/null 2>>"$PRIV/pr.err"; then
+              echo "### 已自动合并到 main" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "::warning::自动合并失败（多半是冲突或序号撞号），PR 留着人工处理：${URL}"
+            fi
+          else
+            echo "::warning::自动开 PR 失败，分支 ${AUTO_BRANCH} 已推到私有仓库，请手动开 PR"
+            exit 1
+          fi
