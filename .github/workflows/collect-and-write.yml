@@ -13,6 +13,8 @@ on:
   schedule:
     # 每天北京时间 03:47（UTC 前一日 19:47）。错开整点，GitHub 整点排队最堵。
     - cron: "47 19 * * *"
+    # 保活：公开仓库 60 天没有提交，GitHub 会停掉全部 schedule。每月 1 号提交一次 .keepalive。
+    - cron: "17 3 1 * *"
   workflow_dispatch:
     inputs:
       fetch_only:
@@ -41,6 +43,7 @@ concurrency:
 
 jobs:
   collect-write:
+    if: github.event.schedule != '17 3 1 * *'
     runs-on: ubuntu-latest
     timeout-minutes: 300
     env:
@@ -282,3 +285,19 @@ jobs:
             echo "::warning::自动开 PR 失败，分支 ${AUTO_BRANCH} 已推到私有仓库，请手动开 PR"
             exit 1
           fi
+
+  keepalive:
+    if: github.event.schedule == '17 3 1 * *'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Commit keepalive
+        run: |
+          date -u +%FT%TZ > .keepalive
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .keepalive
+          git commit -q -m "chore: keepalive"
+          git push -q
