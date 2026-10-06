@@ -118,6 +118,10 @@ jobs:
 
       - name: Fetch materials (no writing)
         if: env.FETCH_ONLY == 'true'
+        env:
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          WM_MODEL: ${{ vars.WM_MODEL || 'glm-5.3-flash' }}
+          WM_MODE: ${{ vars.WM_MODE || 'mosaic' }}
         run: |
           set -euo pipefail
           rc=0
@@ -125,6 +129,11 @@ jobs:
             python articles/wh_fetch.py list --category Forever --json
             python pipeline/fetch_materials.py --limit "${MAX_ARTICLES}"
           } > "$PRIV/fetch.log" 2>&1 || rc=$?
+          # 抓材料模式也过一遍水印检测，方便在 artifact 里看效果；没配 Key 就跳过
+          if [ -n "${ZHIPU_API_KEY}" ] && [ -d pipeline/materials ] && [ -f pipeline/wm_scrub.py ]; then
+            WM_ORIG_DIR="$PRIV/wm-orig" python pipeline/wm_scrub.py --dir pipeline/materials > "$PRIV/watermark.log" 2>&1 || true
+            echo "水印：$(tail -n 1 "$PRIV/watermark.log")"
+          fi
           echo "### 抓材料结束（退出码 $rc），结果在加密 artifact 里" >> "$GITHUB_STEP_SUMMARY"
           exit $rc
 
@@ -159,6 +168,24 @@ jobs:
           opencode run --model "${OPENCODE_MODEL}" --print-logs "${PROMPT}" > "$PRIV/opencode.log" 2>&1 || rc=$?
           echo "opencode 退出码 $rc，日志 $(wc -l < "$PRIV/opencode.log") 行（在加密 artifact 里）"
           exit $rc
+
+      - name: Scrub watermarks
+        if: env.FETCH_ONLY != 'true'
+        env:
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          WM_MODEL: ${{ vars.WM_MODEL || 'glm-5.3-flash' }}
+          WM_MODE: ${{ vars.WM_MODE || 'mosaic' }}
+        run: |
+          # 视觉模型检测本轮新增/改动的 articles/images/*，有网站水印（Wowhead 爪子 logo）就打码或裁底。
+          # 逐张结果含文件名，只进 watermark.log；公开日志只留汇总行。原图进 $PRIV/wm-orig（随加密 artifact）。
+          # 接口失败不拦流程：脚本自身退出码恒为 0，失败张数见汇总行。
+          set -uo pipefail
+          if [ ! -f pipeline/wm_scrub.py ]; then echo "内容仓库还没有 wm_scrub.py，跳过"; exit 0; fi
+          WM_ORIG_DIR="$PRIV/wm-orig" python pipeline/wm_scrub.py --changed > "$PRIV/watermark.log" 2>&1 || true
+          echo "水印：$(tail -n 1 "$PRIV/watermark.log")"
+          if grep -q '^\[error\]' "$PRIV/watermark.log"; then
+            echo "::warning::部分图片水印检测失败，可能仍带水印，详情见加密 artifact 里的 watermark.log"
+          fi
 
       - name: Gate - paths and article checks
         if: env.FETCH_ONLY != 'true'

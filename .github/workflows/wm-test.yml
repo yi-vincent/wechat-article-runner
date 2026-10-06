@@ -1,0 +1,98 @@
+name: Watermark test
+
+# 反复测视觉模型的水印检测：固定几张 Wowhead 公开截图，每张检测 N 次，看判断稳不稳、框准不准。
+# 只读私有仓库的 pipeline/wm_scrub.py，不建分支、不改内容。测试图都是 Wowhead 公开图，结果直接写公开日志；
+# 打码/裁底后的图和原图上传为 artifact，下载对比。
+#
+# 默认 4 张：
+#   1304862  明显水印（爪子 logo 贴近右下，旁边有 Customize 按钮）
+#   1304861  同一场景另一张，看两次是否一致
+#   1304839  淡水印 + 右下角有魔兽 W 徽标（干扰项：W 徽标不该算水印）
+#   1304843  无水印，右下角是技能图标面板（误判陷阱）
+
+on:
+  workflow_dispatch:
+    inputs:
+      shots:
+        description: "Wowhead 截图 ID，逗号分隔"
+        type: string
+        default: "1304862,1304861,1304839,1304843"
+      repeat:
+        description: "每张检测几次"
+        type: string
+        default: "3"
+      mode:
+        description: "mosaic 打码 / crop 裁底"
+        type: choice
+        options: [mosaic, crop]
+        default: mosaic
+      model:
+        description: "视觉模型（留空用 vars.WM_MODEL，再空则 glm-5.3-flash）"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  wm-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout script
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.CONTENT_REPO }}
+          token: ${{ secrets.CONTENT_REPO_TOKEN }}
+          ref: main
+          persist-credentials: false
+          sparse-checkout: pipeline
+          sparse-checkout-cone-mode: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install -q "Pillow>=10.0"
+
+      - name: Download test shots
+        env:
+          SHOTS: ${{ inputs.shots }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/wmtest/out"
+          for id in $(echo "$SHOTS" | tr ',，' '  '); do
+            [[ "$id" =~ ^[0-9]+$ ]] || { echo "::error::不是数字 ID：$id"; exit 1; }
+            curl -fsSL -A "Mozilla/5.0" -o "$RUNNER_TEMP/wmtest/out/shot${id}.jpg" \
+              "https://wow.zamimg.com/uploads/screenshots/normal/${id}.jpg"
+            echo "shot${id}.jpg $(du -k "$RUNNER_TEMP/wmtest/out/shot${id}.jpg" | cut -f1)KB"
+          done
+
+      - name: Run detection
+        env:
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          WM_MODEL: ${{ inputs.model || vars.WM_MODEL || 'glm-5.3-flash' }}
+          WM_MODE: ${{ inputs.mode }}
+          WM_ORIG_DIR: ${{ runner.temp }}/wmtest/orig
+          REPEAT: ${{ inputs.repeat }}
+        run: |
+          set -uo pipefail
+          [ -n "${ZHIPU_API_KEY}" ] || { echo "::error::缺少 secrets.ZHIPU_API_KEY"; exit 1; }
+          echo "模型 ${WM_MODEL}，模式 ${WM_MODE}，每张 ${REPEAT} 次"
+          python pipeline/wm_scrub.py --dir "$RUNNER_TEMP/wmtest/out" --repeat "${REPEAT}" | tee "$RUNNER_TEMP/wmtest/result.log"
+          {
+            echo "### 水印检测测试（${WM_MODEL} / ${WM_MODE} / ×${REPEAT}）"
+            echo '```'
+            sed "s#${RUNNER_TEMP}/wmtest/out/##" "$RUNNER_TEMP/wmtest/result.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload images
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wm-test-${{ github.run_number }}
+          path: ${{ runner.temp }}/wmtest/
+          retention-days: 7
