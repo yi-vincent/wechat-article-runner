@@ -164,22 +164,27 @@ jobs:
         if: env.FETCH_ONLY != 'true'
         run: |
           # 闸门逻辑与此前在私有仓库时相同；输出含文件名和正文片段，全部进 gate.log
-          bash -euo pipefail > "$PRIV/gate.log" 2>&1 <<'GATE' || { echo "::error::闸门未过，不开 PR（原因见加密 artifact 里的 gate.log）"; exit 1; }
+          # 公开日志只写卡在哪一项（gate_step.txt），具体文件名与正文仍只进 gate.log
+          bash -euo pipefail > "$PRIV/gate.log" 2>&1 <<'GATE' || { echo "::error::闸门未过：$(cat "$PRIV/gate_step.txt" 2>/dev/null || echo 未知)。不开 PR，详情见加密 artifact 里的 gate.log"; exit 1; }
           # 1) 只允许动这三处
           BAD=$(git -c core.quotepath=off status --porcelain --untracked-files=all \
             | awk '{print $NF}' \
             | grep -vE '^(articles/|pipeline/pending_publish\.yaml$|pipeline/runs/)' || true)
           if [ -n "$BAD" ]; then
+            # 只记顶层目录（如 tools/、AGENTS.md），不暴露完整文件名
+            echo "1-改动越界：$(echo "$BAD" | cut -d/ -f1 | sort -u | tr '\n' ' ')" > "$PRIV/gate_step.txt"
             echo "Agent 改动了允许范围以外的文件："
             echo "$BAD"
             exit 1
           fi
           # 2) 安全闸不许被打开
           if grep -qE '^auto_publish:\s*true' pipeline/pending_publish.yaml; then
+            echo "2-auto_publish 被打开" > "$PRIV/gate_step.txt"
             echo "pending_publish.yaml 的 auto_publish 被改成了 true"
             exit 1
           fi
           # 3) 待推队列的摘要不超过 120 字（按字数，不是字节）
+          echo "3-摘要超过 120 字" > "$PRIV/gate_step.txt"
           python3 - <<'EOF'
           import sys, yaml
           d = yaml.safe_load(open("pipeline/pending_publish.yaml", encoding="utf-8")) or {}
@@ -197,6 +202,7 @@ jobs:
             echo "没有新成稿"
             exit 0
           fi
+          echo "4-lint 未过" > "$PRIV/gate_step.txt"
           python3 tools/lint.py --changed
           GATE
           echo "闸门通过"
