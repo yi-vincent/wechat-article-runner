@@ -24,9 +24,10 @@ on:
         type: string
         default: ""
       limit:
-        description: "本轮最多写几篇；0 = 未用的全部写完"
+        description: "本轮最多写几篇；留空 = 用仓库 Variables 的 MAX_ARTICLES；0 = 未用的全部写完"
         type: string
-        default: "1"
+        # 必须留空：服务器 dispatch 传 limit="" 时 GitHub 会套用这里的默认值，写 "1" 就每天只写 1 篇
+        default: ""
       no_pr:
         description: "只跑不交付：不推 auto/ 分支、不开 PR（结果在加密 artifact 里）"
         type: boolean
