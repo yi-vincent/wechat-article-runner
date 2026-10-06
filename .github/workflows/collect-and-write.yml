@@ -171,6 +171,9 @@ jobs:
 
       - name: Scrub watermarks
         if: env.FETCH_ONLY != 'true'
+        # 图片处理失败绝不拦流程：出错 / 超时都继续往下走，没处理成的图就用原图
+        continue-on-error: true
+        timeout-minutes: 15
         env:
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
           WM_MODEL: ${{ vars.WM_MODEL || 'glm-5.3-flash' }}
@@ -178,18 +181,21 @@ jobs:
         run: |
           # 视觉模型检测本轮新增/改动的 articles/images/*，有网站水印（Wowhead 爪子 logo）就打码或裁底。
           # 逐张结果含文件名，只进 watermark.log；公开日志只留汇总行。原图进 $PRIV/wm-orig（随加密 artifact）。
-          # 接口失败不拦流程：脚本自身退出码恒为 0，失败张数见汇总行。
+          # 失败不拦流程：单张失败用原图；脚本退出码恒为 0；总时限 WM_DEADLINE（10 分钟）到了剩下的用原图。
           set -uo pipefail
+          trap 'find articles/images -name "*.wmtmp" -delete 2>/dev/null; true' EXIT
           if [ ! -f pipeline/wm_scrub.py ]; then echo "内容仓库还没有 wm_scrub.py，跳过"; exit 0; fi
-          WM_ORIG_DIR="$PRIV/wm-orig" python pipeline/wm_scrub.py --changed > "$PRIV/watermark.log" 2>&1 || true
-          echo "水印：$(tail -n 1 "$PRIV/watermark.log")"
-          if grep -q '^\[error\]' "$PRIV/watermark.log"; then
-            echo "::warning::部分图片水印检测失败，可能仍带水印，详情见加密 artifact 里的 watermark.log"
+          WM_ORIG_DIR="$PRIV/wm-orig" WM_DEADLINE=600 python pipeline/wm_scrub.py --changed > "$PRIV/watermark.log" 2>&1 || true
+          echo "水印：$(tail -n 1 "$PRIV/watermark.log" 2>/dev/null)"
+          if grep -q '^\[error\]' "$PRIV/watermark.log" 2>/dev/null; then
+            echo "::warning::部分图片水印处理失败，已用原图（可能仍带水印），详情见加密 artifact 里的 watermark.log"
           fi
+          exit 0
 
       - name: Gate - paths and article checks
         if: env.FETCH_ONLY != 'true'
         run: |
+          find articles/images -name "*.wmtmp" -delete 2>/dev/null || true
           # 闸门逻辑与此前在私有仓库时相同；输出含文件名和正文片段，全部进 gate.log
           # 公开日志只写卡在哪一项（gate_step.txt），具体文件名与正文仍只进 gate.log
           bash -euo pipefail > "$PRIV/gate.log" 2>&1 <<'GATE' || { echo "::error::闸门未过：$(cat "$PRIV/gate_step.txt" 2>/dev/null || echo 未知)。不开 PR，详情见加密 artifact 里的 gate.log"; exit 1; }
