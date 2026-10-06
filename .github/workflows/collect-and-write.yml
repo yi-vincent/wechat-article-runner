@@ -6,15 +6,13 @@ name: Collect and write
 # 公开仓库的日志与 artifact 谁都能看，所以：
 #   - 会打印正文/文件名的命令，输出一律重定向到 $PRIV（runner 临时目录），日志里只写通过/失败；
 #   - artifact 用 ARTIFACT_PASSPHRASE 加密后才上传，没配口令就不上传；
-#   - 只允许 schedule / workflow_dispatch 触发，不接任何 PR 事件（fork 拿不到 secrets，也碰不到这里）。
+#   - 只允许 workflow_dispatch 触发，不接任何 PR 事件（fork 拿不到 secrets，也碰不到这里）。
 # 禁止 wewrite publish。
 
 on:
-  schedule:
-    # 每天北京时间 03:47（UTC 前一日 19:47）。错开整点，GitHub 整点排队最堵。
-    - cron: "47 19 * * *"
-    # 保活：公开仓库 60 天没有提交，GitHub 会停掉全部 schedule。每月 1 号提交一次 .keepalive。
-    - cron: "17 3 1 * *"
+  # 不用 GitHub schedule（实测延迟 2–5 小时，高负载时整次跳过）。
+  # 由国内服务器每天北京时间 07:10 调 API 触发（私有仓库 pipeline/daily_ops.py dispatch）。
+  # 没有 schedule 也就不受「公开仓库 60 天无提交停用 schedule」的影响，不再需要 keepalive。
   workflow_dispatch:
     inputs:
       fetch_only:
@@ -43,7 +41,6 @@ concurrency:
 
 jobs:
   collect-write:
-    if: github.event.schedule != '17 3 1 * *'
     runs-on: ubuntu-latest
     timeout-minutes: 300
     env:
@@ -285,19 +282,3 @@ jobs:
             echo "::warning::自动开 PR 失败，分支 ${AUTO_BRANCH} 已推到私有仓库，请手动开 PR"
             exit 1
           fi
-
-  keepalive:
-    if: github.event.schedule == '17 3 1 * *'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - name: Commit keepalive
-        run: |
-          date -u +%FT%TZ > .keepalive
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .keepalive
-          git commit -q -m "chore: keepalive"
-          git push -q
