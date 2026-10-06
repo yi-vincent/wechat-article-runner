@@ -195,7 +195,7 @@ jobs:
           sys.exit(1 if bad else 0)
           EOF
           # 4) 新成稿逐篇过审核脚本（不信 Agent 自报）
-          NEW=$(git ls-files --others --exclude-standard 'articles/[0-9][0-9]-*.md' || true)
+          NEW=$(git ls-files --others --exclude-standard 'articles/[0-9][0-9]*-*.md' || true)
           # 不写进 $GITHUB_ENV：那里的变量会在后续每个步骤开头打印到公开日志
           echo "$NEW" > "$PRIV/new_articles.txt"
           if [ -z "$NEW" ]; then
