@@ -349,6 +349,15 @@ jobs:
               --field file="$(basename "$f")" --field branch="${AUTO_BRANCH}" --field checks=pass \
               >/dev/null
           done
+          # 账本 JSON 统一成服务器写的格式（indent=2、中文不转义）：agent 换了缩进会让整份文件进 diff
+          # （run 30 用 1 格缩进重写了 source_links.json，PR 多出 6000 多行，服务器推草稿时又改回来一遍）
+          python3 - <<'EOF' || true
+          import json, pathlib
+          p = pathlib.Path("articles/source_links.json")
+          if p.exists():
+              p.write_text(json.dumps(json.loads(p.read_text(encoding="utf-8")), ensure_ascii=False, indent=2) + "\n",
+                           encoding="utf-8")
+          EOF
           for pth in articles pipeline/pending_publish.yaml pipeline/runs pipeline/events; do
             [ -e "$pth" ] && git add "$pth"
           done
