@@ -191,6 +191,8 @@ jobs:
         env:
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
           OPENCODE_MODEL: ${{ vars.ZHIPU_OPENCODE_MODEL || 'zhipu/glm-5.3-flash' }}
+          # 雷达那一步把公众号全文缓存在这里，agent 调 wx_fetch.py get 读缓存（不给 agent WX2RSS token）
+          WX_CACHE: ${{ runner.temp }}/wx-cache
           PROMPT: |
             按仓库 pipeline/gha-agent-brief.md 执行 WeWrite 写稿。
 
@@ -201,7 +203,8 @@ jobs:
             临时文件放 pipeline/runs/ 或 .wewrite/ 下，不要写仓库外的目录。
             选题三条通道：articles/bz_fetch.py（官方站，优先）和 articles/wh_fetch.py（Wowhead，官方没有的内容）各 list 一遍；
             articles/wx_fetch.py todo（公众号雷达：最近 2 天的「无限」事件，写过的已自动排除）逐个处理——单独成篇 / 并进速递 / 跳过，
-            都用 articles/wx_fetch.py mark 登记，收尾前 todo 必须为 0。公众号内容只当线索，按 brief 追原始出处。不要用 websearch。
+            都用 articles/wx_fetch.py mark 登记，收尾前 todo 必须为 0。取不到全文等工具问题不要 mark，留到下一轮并在最终回复里写明。
+            公众号内容只当线索，按 brief 追原始出处。不要用 websearch。
             禁止 wewrite publish。没有未用新闻、雷达 todo 也为 0 就结束，不要改无关文件。
             只改工作区文件：articles/、pipeline/pending_publish.yaml、pipeline/runs/。articles/wx_events.json 是雷达账本，不要改。
             不要 git commit、不要 git push、不要开 PR；提交由后面的 workflow step 做。
