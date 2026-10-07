@@ -357,19 +357,51 @@ jobs:
             exit 0
           fi
           LIST=$(echo "$NEW_ARTICLES" | sed '/^$/d; s#^articles/#- #')
-          git commit -q -m "auto: ${DAY} 新成稿（run ${{ github.run_number }}）"
+          # 没有新稿时（只有公众号雷达账本 / 处理记录变了）标题写明，别叫「新成稿」
+          if [ -n "$LIST" ]; then KIND="新成稿"; else KIND="雷达账本（无新稿）"; fi
+          git commit -q -m "auto: ${DAY} ${KIND}（run ${{ github.run_number }}）"
           git push -q "https://x-access-token:${TOKEN}@github.com/${CONTENT_REPO}.git" "HEAD:${AUTO_BRANCH}" 2>/dev/null
-          CHECKLIST=$(python3 tools/lint.py $NEW_ARTICLES --checklist 2>/dev/null || true)
-          BODY=$(printf '%s\n\n%s\n\n%s\n\n%s\n' \
+          # 人审清单只给本轮新稿；$NEW_ARTICLES 为空时 lint 会把全部旧稿的清单都列出来（run 29 的 PR 就这样被撑长）
+          CHECKLIST=""
+          if [ -n "$LIST" ]; then
+            CHECKLIST=$(python3 tools/lint.py $NEW_ARTICLES --checklist 2>/dev/null || true)
+          fi
+          # 公众号雷达：本轮 agent 对每个事件怎么处理的（成篇 / 速递 / 跳过 + 理由）。PR 在私有仓库，标题可以写进来
+          RADAR=""
+          if [ -f articles/wx_handled.yaml ]; then
+            RADAR=$(python3 - 2>/dev/null <<'EOF' || true
+          import collections, subprocess, yaml
+          def load(txt):
+              return (yaml.safe_load(txt) or {}).get("handled") or []
+          try:
+              base = load(subprocess.run(["git", "show", "HEAD~1:articles/wx_handled.yaml"],
+                                         capture_output=True, text=True, check=True).stdout)
+          except Exception:
+              base = []
+          seen = {(r.get("event"), r.get("at")) for r in base}
+          new = [r for r in load(open("articles/wx_handled.yaml", encoding="utf-8").read())
+                 if (r.get("event"), r.get("at")) not in seen]
+          if new:
+              c = collections.Counter(r.get("how") for r in new)
+              print("### 公众号雷达：本轮处理 %d 个事件（单独成篇 %d / 并进速递 %d / 跳过 %d）"
+                    % (len(new), c["written"], c["digest"], c["skip"]))
+              for r in new:
+                  how = {"written": "成篇 #%s" % r.get("no"), "digest": "速递 #%s" % r.get("no")}.get(r.get("how"), "跳过")
+                  print("- %s ｜ %s%s" % (r.get("title"), how, "：" + r["why"] if r.get("why") else ""))
+          EOF
+          )
+          fi
+          BODY=$(printf '%s\n\n%s\n\n%s\n\n%s\n\n%s\n' \
             "OpenCode 自动成稿，已过 tools/lint.py（规则见 rules/registry.yaml）。运行记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            "${LIST:-（无新 md，仅账本/词表改动）}" \
+            "${LIST:-（无新稿，只有公众号雷达账本 / 处理记录）}" \
+            "${RADAR}" \
             "${CHECKLIST}" \
             "本 PR 由 workflow 自动合并（机器闸门已过）。上面的人审项是事后复查清单——发现问题在 main 上改，或 revert 本次 squash commit。")
           if URL=$(gh pr create --repo "${CONTENT_REPO}" --base main --head "${AUTO_BRANCH}" \
-                --title "auto: ${DAY} 新成稿" --body "$BODY" 2>"$PRIV/pr.err"); then
+                --title "auto: ${DAY} ${KIND}" --body "$BODY" 2>"$PRIV/pr.err"); then
             echo "### PR：${URL}" >> "$GITHUB_STEP_SUMMARY"
             if gh pr merge "$URL" --repo "${CONTENT_REPO}" --squash --delete-branch \
-                 --subject "auto: ${DAY} 新成稿（run ${{ github.run_number }}）" >/dev/null 2>>"$PRIV/pr.err"; then
+                 --subject "auto: ${DAY} ${KIND}（run ${{ github.run_number }}）" >/dev/null 2>>"$PRIV/pr.err"; then
               echo "### 已自动合并到 main" >> "$GITHUB_STEP_SUMMARY"
             else
               echo "::warning::自动合并失败（多半是冲突或序号撞号），PR 留着人工处理：${URL}"
