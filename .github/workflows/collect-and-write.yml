@@ -53,24 +53,28 @@ jobs:
       WEWRITE_HOME: ${{ github.workspace }}/.wewrite
     steps:
       - name: Preflight
+        id: preflight
         env:
           TOKEN: ${{ secrets.CONTENT_REPO_TOKEN }}
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
         run: |
           set -euo pipefail
+          PRIV="${RUNNER_TEMP}/private"
+          mkdir -p "$PRIV"
+          date +%s > "$PRIV/t0"   # 飞书通知里的用时
           miss=""
           [ -n "${CONTENT_REPO}" ] || miss="$miss vars.CONTENT_REPO"
           [ -n "${TOKEN}" ] || miss="$miss secrets.CONTENT_REPO_TOKEN"
           if [ "${FETCH_ONLY}" != "true" ] && [ -z "${ZHIPU_API_KEY}" ]; then miss="$miss secrets.ZHIPU_API_KEY"; fi
           if [ -n "$miss" ]; then
+            echo "缺少配置：$miss（runner 仓库 Settings → Secrets and variables → Actions）" > "$PRIV/preflight.log"
             echo "::error::缺少配置：$miss（Settings → Secrets and variables → Actions）"
             exit 1
           fi
-          PRIV="${RUNNER_TEMP}/private"
-          mkdir -p "$PRIV"
           echo "PRIV=${PRIV}" >> "$GITHUB_ENV"
 
       - name: Checkout content repo
+        id: checkout
         uses: actions/checkout@v4
         with:
           repository: ${{ vars.CONTENT_REPO }}
@@ -81,6 +85,7 @@ jobs:
           persist-credentials: false
 
       - name: Create auto branch
+        id: branch
         env:
           TOKEN: ${{ secrets.CONTENT_REPO_TOKEN }}
         run: |
@@ -101,6 +106,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install deps
+        id: deps
         run: |
           set -euo pipefail
           python -m pip install -q --upgrade pip
@@ -117,6 +123,7 @@ jobs:
           echo "依赖已装好"
 
       - name: Fetch materials (no writing)
+        id: fetch
         if: env.FETCH_ONLY == 'true'
         env:
           ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
@@ -137,13 +144,40 @@ jobs:
           echo "### 抓材料结束（退出码 $rc），结果在加密 artifact 里" >> "$GITHUB_STEP_SUMMARY"
           exit $rc
 
+      - name: CN official channel (wow.blizzard.cn)
+        id: cn
+        # 国服官网是信源第一位，不能只靠 agent 自觉去查：这里固定先跑一遍，结果写进公开 Summary。
+        # 官网新闻本来就是公开内容，标题/ID 进公开日志没问题。抓不到（境外 IP 被拦、改版）直接报错，不静默跑空。
+        run: |
+          set -uo pipefail
+          {
+            echo "### 国服官网（wow.blizzard.cn/news）"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if out=$(python articles/bz_fetch.py list --keyword "" --all --limit 25 2>&1); then
+            echo "$out" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "$out"
+            UNUSED=$(python articles/bz_fetch.py list --json | python -c "import json,sys; print(len(json.load(sys.stdin)))")
+            echo "「无限」未用：${UNUSED} 条" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "国服官网：「无限」未用 ${UNUSED} 条" > "$PRIV/cn_summary.txt"
+          else
+            echo "$out" > "$PRIV/cn.log"
+            echo "$out" | tail -5 >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::国服官网抓取失败，本轮缺官方通道，不继续写稿"
+            exit 1
+          fi
+
       - name: Install OpenCode CLI
+        id: opencode_install
         if: env.FETCH_ONLY != 'true'
         run: |
           curl -fsSL https://opencode.ai/install | bash > "$PRIV/opencode-install.log" 2>&1
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
       - name: WeChat radar (Wechat2RSS, last 2 days)
+        id: radar
         if: env.FETCH_ONLY != 'true'
         # 国内公众号雷达（私有仓库 articles/wx_fetch.py）：只拉最近 2 天，各号转的同一条新闻合并成事件，写过的自动排除；
         # 配图过视觉模型判水印（pipeline/wx_wm.py）。雷达账本 articles/wx_events.json 随本轮 PR 一起提交。
@@ -168,6 +202,7 @@ jobs:
           python articles/wx_fetch.py sync > "$PRIV/wx_radar.log" 2>&1 || rc=$?
           if [ $rc -ne 0 ]; then
             git checkout -q -- articles/wx_events.json 2>/dev/null || rm -f articles/wx_events.json
+            echo "公众号雷达同步失败（退出码 $rc），本轮只用官网和 Wowhead" > "$PRIV/radar_fail.txt"
             echo "::warning::公众号雷达同步失败（退出码 $rc），本轮只用官网和 Wowhead；详情见加密 artifact 里的 wx_radar.log"
             exit 0
           fi
@@ -184,8 +219,10 @@ jobs:
           used = sum(1 for e in ev if e.get("used"))
           print(f"公众号雷达：最近 2 天「无限」事件 {len(ev)} 个，写过自动排除 {used} 个，待 agent 处理 {todo} 个")
           EOF
+          tail -n 1 "$GITHUB_STEP_SUMMARY" > "$PRIV/radar_summary.txt"
 
       - name: OpenCode agent
+        id: agent
         if: env.FETCH_ONLY != 'true'
         timeout-minutes: 150
         env:
@@ -217,6 +254,7 @@ jobs:
           exit $rc
 
       - name: Scrub watermarks
+        id: wm
         if: env.FETCH_ONLY != 'true'
         # 图片处理失败绝不拦流程：出错 / 超时都继续往下走，没处理成的图就用原图
         continue-on-error: true
@@ -240,6 +278,7 @@ jobs:
           exit 0
 
       - name: Gate - paths and article checks
+        id: gate
         if: env.FETCH_ONLY != 'true'
         run: |
           find articles/images -name "*.wmtmp" -delete 2>/dev/null || true
@@ -291,6 +330,7 @@ jobs:
             python articles/wx_fetch.py todo --json > "$PRIV/wx_todo_after.json" 2>/dev/null || true
             LEFT=$(python -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$PRIV/wx_todo_after.json" 2>/dev/null || echo "?")
             if [ "$LEFT" != "0" ]; then
+              echo "公众号雷达还有 ${LEFT} 个「无限」事件 agent 没处理（不拦 PR，下一轮还会列出来）" > "$PRIV/radar_left.txt"
               echo "::warning::公众号雷达还有 ${LEFT} 个「无限」事件 agent 没处理（不拦 PR，下一轮还会列出来）"
               echo "公众号雷达：收尾时还有 ${LEFT} 个事件没处理" >> "$GITHUB_STEP_SUMMARY"
             fi
@@ -332,6 +372,7 @@ jobs:
           retention-days: 14
 
       - name: Push auto branch and open PR
+        id: pr
         if: env.FETCH_ONLY != 'true' && env.NO_PR != 'true'
         env:
           TOKEN: ${{ secrets.CONTENT_REPO_TOKEN }}
@@ -342,7 +383,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           for f in $NEW_ARTICLES; do
-            no=$(basename "$f" | cut -c1-2 | sed 's/^0//')
+            # 按 - 切出序号：cut -c1-2 会把 110-xxx.md 记成 11（#100 起的事件日志都错了）
+            no=$(basename "$f" | cut -d- -f1 | sed 's/^0*//')
             python3 pipeline/eventlog.py --actor gha --run-id "${{ github.run_id }}" \
               --stage written --series "$no" \
               --field model="${{ vars.ZHIPU_OPENCODE_MODEL || 'zhipu/glm-5.3-flash' }}" \
@@ -363,13 +405,14 @@ jobs:
           done
           if git diff --cached --quiet; then
             echo "### 本轮没有新成稿，未建分支" >> "$GITHUB_STEP_SUMMARY"
+            echo nothing > "$PRIV/merge_state"
             exit 0
           fi
           LIST=$(echo "$NEW_ARTICLES" | sed '/^$/d; s#^articles/#- #')
           # 没有新稿时（只有公众号雷达账本 / 处理记录变了）标题写明，别叫「新成稿」
           if [ -n "$LIST" ]; then KIND="新成稿"; else KIND="雷达账本（无新稿）"; fi
           git commit -q -m "auto: ${DAY} ${KIND}（run ${{ github.run_number }}）"
-          git push -q "https://x-access-token:${TOKEN}@github.com/${CONTENT_REPO}.git" "HEAD:${AUTO_BRANCH}" 2>/dev/null
+          git push -q "https://x-access-token:${TOKEN}@github.com/${CONTENT_REPO}.git" "HEAD:${AUTO_BRANCH}" 2>"$PRIV/push.err"
           # 人审清单只给本轮新稿；$NEW_ARTICLES 为空时 lint 会把全部旧稿的清单都列出来（run 29 的 PR 就这样被撑长）
           CHECKLIST=""
           if [ -n "$LIST" ]; then
@@ -409,13 +452,148 @@ jobs:
           if URL=$(gh pr create --repo "${CONTENT_REPO}" --base main --head "${AUTO_BRANCH}" \
                 --title "auto: ${DAY} ${KIND}" --body "$BODY" 2>"$PRIV/pr.err"); then
             echo "### PR：${URL}" >> "$GITHUB_STEP_SUMMARY"
+            echo "$URL" > "$PRIV/pr_url.txt"
             if gh pr merge "$URL" --repo "${CONTENT_REPO}" --squash --delete-branch \
                  --subject "auto: ${DAY} ${KIND}（run ${{ github.run_number }}）" >/dev/null 2>>"$PRIV/pr.err"; then
+              echo merged > "$PRIV/merge_state"
               echo "### 已自动合并到 main" >> "$GITHUB_STEP_SUMMARY"
             else
+              echo failed > "$PRIV/merge_state"
               echo "::warning::自动合并失败（多半是冲突或序号撞号），PR 留着人工处理：${URL}"
             fi
           else
             echo "::warning::自动开 PR 失败，分支 ${AUTO_BRANCH} 已推到私有仓库，请手动开 PR"
             exit 1
+          fi
+
+      # 每轮都推一张飞书卡片（secrets.FEISHU_WEBHOOK；机器人开了签名校验再配 FEISHU_SIGN_SECRET）：
+      #   ✅ 成功：新稿篇目和标题、PR、合并没有，外加官网 / 公众号雷达概况；没有新稿也报一声
+      #   ⚠️ 跑完了但有提醒：自动合并失败、雷达同步失败或没处理完、水印处理出错
+      #   ❌ 失败：卡在哪一步，外加那一步日志的末尾 40 行
+      # 标题、日志都在 $PRIV，只进飞书，不进公开日志。卡片用私有仓库 HEAD 上的 pipeline/notify.py
+      # （git show，不跑 agent 可能动过的工作区版本）；checkout 都失败了就没有脚本，退回 curl 发一行纯文本。
+      # 推送失败只记警告，不影响本次运行结果。
+      - name: Notify Feishu
+        if: always()
+        env:
+          NOTIFY_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          FEISHU_SIGN_SECRET: ${{ secrets.FEISHU_SIGN_SECRET }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_NO: ${{ github.run_number }}
+          JOB_STATUS: ${{ job.status }}
+          S_PREFLIGHT: ${{ steps.preflight.outcome }}
+          S_CHECKOUT: ${{ steps.checkout.outcome }}
+          S_BRANCH: ${{ steps.branch.outcome }}
+          S_DEPS: ${{ steps.deps.outcome }}
+          S_FETCH: ${{ steps.fetch.outcome }}
+          S_CN: ${{ steps.cn.outcome }}
+          S_OC_INSTALL: ${{ steps.opencode_install.outcome }}
+          S_RADAR: ${{ steps.radar.outcome }}
+          S_AGENT: ${{ steps.agent.outcome }}
+          S_WM: ${{ steps.wm.outcome }}
+          S_GATE: ${{ steps.gate.outcome }}
+          S_PR: ${{ steps.pr.outcome }}
+        run: |
+          set +e -uo pipefail
+          if [ -z "${NOTIFY_WEBHOOK}" ]; then
+            echo "::warning::未配置 FEISHU_WEBHOOK，本轮结果没推飞书"
+            exit 0
+          fi
+          PRIV="${PRIV:-${RUNNER_TEMP}/private}"
+          N="${RUNNER_TEMP}/notify"
+          mkdir -p "$PRIV" "$N"
+          ITEMS=(); FAILS=(); WARNS=()
+          # 记一条失败 / 提醒：第一行标题（卡片里加粗），后面接相关日志的末尾
+          item() {  # item fail|warn 键 标题 [日志…]
+            local kind="$1" key="$2" title="$3" f; shift 3
+            f="$N/$kind-$key.txt"
+            { echo "$title"; for x in "$@"; do [ -s "$x" ] && tail -n 40 "$x"; done; } > "$f"
+            if [ "$kind" = fail ]; then FAILS+=("$title"); else WARNS+=("$title"); fi
+            ITEMS+=(--fail "$f")
+          }
+          [ "$S_PREFLIGHT" = failure ] && item fail preflight "✗ 配置缺失" "$PRIV/preflight.log"
+          [ "$S_CHECKOUT" = failure ] && item fail checkout "✗ checkout 私有仓库失败（CONTENT_REPO_TOKEN 过期或没权限？）"
+          [ "$S_BRANCH" = failure ] && item fail branch "✗ 建 auto 分支失败"
+          [ "$S_DEPS" = failure ] && item fail deps "✗ 装依赖失败" "$PRIV/install.log"
+          [ "$S_FETCH" = failure ] && item fail fetch "✗ 抓材料失败" "$PRIV/fetch.log"
+          [ "$S_CN" = failure ] && item fail cn "✗ 国服官网抓取失败，本轮没写稿" "$PRIV/cn.log"
+          [ "$S_OC_INSTALL" = failure ] && item fail oc_install "✗ 安装 OpenCode 失败" "$PRIV/opencode-install.log"
+          [ "$S_AGENT" = failure ] && item fail agent "✗ OpenCode 写稿失败或超时" "$PRIV/opencode.log"
+          [ "$S_GATE" = failure ] && item fail gate "✗ 闸门未过：$(cat "$PRIV/gate_step.txt" 2>/dev/null || echo 未知)，没开 PR" "$PRIV/gate.log"
+          [ "$S_PR" = failure ] && item fail pr "✗ 推分支 / 开 PR 失败" "$PRIV/push.err" "$PRIV/pr.err"
+          if [ "$JOB_STATUS" = failure ] && [ ${#FAILS[@]} -eq 0 ]; then
+            item fail other "✗ 其他步骤失败（Setup Python 等），见运行记录"
+          fi
+          MERGE="$(cat "$PRIV/merge_state" 2>/dev/null)"
+          [ "$MERGE" = failed ] && item warn merge "⚠ 自动合并失败（多半是冲突或序号撞号），PR 留着人工处理" "$PRIV/pr.err"
+          if [ -s "$PRIV/radar_fail.txt" ] || [ "$S_RADAR" = failure ]; then
+            item warn radar "⚠ $(cat "$PRIV/radar_fail.txt" 2>/dev/null || echo 公众号雷达出错，本轮只用官网和 Wowhead)" "$PRIV/wx_radar.log"
+          fi
+          [ -s "$PRIV/radar_left.txt" ] && item warn radar_left "⚠ $(cat "$PRIV/radar_left.txt")"
+          if [ "$S_WM" = failure ] || grep -q '^\[error\]' "$PRIV/watermark.log" 2>/dev/null; then
+            grep '^\[error\]' "$PRIV/watermark.log" > "$N/wm.log" 2>/dev/null
+            item warn wm "⚠ 部分图片水印处理失败，已用原图（可能仍带水印）" "$N/wm.log"
+          fi
+
+          # 新稿：序号 · 标题（正文第一行）
+          : > "$N/articles.txt"
+          touch "$PRIV/new_articles.txt"
+          K=0
+          while read -r f; do
+            [ -n "$f" ] && [ -f "$f" ] || continue
+            K=$((K + 1))
+            echo "$(basename "$f" | cut -d- -f1) · $(head -n 1 "$f" | sed -E 's/^#+[[:space:]]*//')" >> "$N/articles.txt"
+          done < "$PRIV/new_articles.txt"
+          cat "$PRIV/cn_summary.txt" "$PRIV/radar_summary.txt" > "$N/context.txt" 2>/dev/null
+
+          T=""; [ -s "$PRIV/t0" ] && T=$(( $(date +%s) - $(cat "$PRIV/t0") ))
+          {
+            if [ "$FETCH_ONLY" = true ]; then
+              echo "只抓材料，结果在加密 artifact 里"
+            elif [ "$S_GATE" = success ] || [ -n "$MERGE" ]; then
+              case "$MERGE" in
+                merged)  [ "$K" -gt 0 ] && echo "**新稿 ${K} 篇**，已自动合并进 main，等服务器推草稿（推成后另有通知）" \
+                                         || echo "没有新稿，只更新了雷达账本（已合并）" ;;
+                failed)  echo "**新稿 ${K} 篇**，PR 已开，自动合并失败" ;;
+                nothing) echo "本轮没有新稿" ;;
+                *)       [ "$NO_PR" = true ] && echo "**新稿 ${K} 篇**，只跑不交付：没推分支、没开 PR" ;;
+              esac
+            fi
+            echo "篇数上限 ${MAX_ARTICLES:-默认}${NEWS_ID:+ · 指定新闻 ${NEWS_ID}}${T:+ · 用时 $((T / 60))m$((T % 60))s}"
+          } > "$N/summary.md"
+
+          if [ "$JOB_STATUS" = cancelled ]; then
+            TITLE="⏹ 文章采集 #${RUN_NO} 被取消（手动取消或超过 300 分钟）"; COLOR=grey
+          elif [ ${#FAILS[@]} -gt 0 ]; then
+            TITLE="❌ 文章采集 #${RUN_NO} 失败 · ${FAILS[0]#✗ }"; COLOR=red
+          elif [ ${#WARNS[@]} -gt 0 ]; then
+            TITLE="⚠️ 文章采集 #${RUN_NO}：新稿 ${K} 篇，${#WARNS[@]} 条提醒"; COLOR=orange
+          elif [ "$K" -gt 0 ]; then
+            TITLE="✅ 文章采集 #${RUN_NO}：新稿 ${K} 篇"; COLOR=green
+          else
+            TITLE="✅ 文章采集 #${RUN_NO}：本轮没有新稿"; COLOR=green
+          fi
+          BUTTONS=(--button "运行记录|${RUN_URL}")
+          [ -s "$PRIV/pr_url.txt" ] && BUTTONS+=(--button "PR|$(cat "$PRIV/pr_url.txt")")
+
+          if git show HEAD:pipeline/notify.py > "$N/notify.py" 2>/dev/null; then
+            python3 "$N/notify.py" --title "$TITLE" --color "$COLOR" \
+              --md "$N/summary.md" --text "$N/articles.txt" --text "$N/context.txt" "${ITEMS[@]}" "${BUTTONS[@]}" \
+              > "$N/send.log" 2>&1
+            RC=$?
+          else
+            jq -n --arg t "$TITLE"$'\n'"$RUN_URL" '{msg_type: "text", content: {text: $t}}' > "$N/msg.json"
+            if [ -n "${FEISHU_SIGN_SECRET}" ]; then
+              TS="$(date +%s)"
+              SIGN="$(printf '' | openssl dgst -sha256 -hmac "$(printf '%s\n%s' "$TS" "$FEISHU_SIGN_SECRET")" -binary | base64)"
+              jq --arg ts "$TS" --arg s "$SIGN" '. + {timestamp: $ts, sign: $s}' "$N/msg.json" > "$N/msg.signed" && mv "$N/msg.signed" "$N/msg.json"
+            fi
+            curl -sS -m 20 -H 'Content-Type: application/json' --data-binary @"$N/msg.json" "$NOTIFY_WEBHOOK" > "$N/send.log" 2>&1
+            grep -qE '"(code|StatusCode)":0' "$N/send.log"; RC=$?
+          fi
+          if [ "$RC" -eq 0 ]; then
+            echo "已推送飞书"
+          else
+            # send.log 只有飞书的返回码，不含内容
+            echo "::warning::飞书推送失败（$(grep -oE '"code":[0-9]+' "$N/send.log" | head -n 1)；19021 = 签名不对或没配 FEISHU_SIGN_SECRET，19024 = 缺机器人设的关键词）"
           fi
