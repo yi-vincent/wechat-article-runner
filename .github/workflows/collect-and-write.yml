@@ -143,6 +143,48 @@ jobs:
           curl -fsSL https://opencode.ai/install | bash > "$PRIV/opencode-install.log" 2>&1
           echo "$HOME/.opencode/bin" >> "$GITHUB_PATH"
 
+      - name: WeChat radar (Wechat2RSS, last 2 days)
+        if: env.FETCH_ONLY != 'true'
+        # 国内公众号雷达（私有仓库 articles/wx_fetch.py）：只拉最近 2 天，各号转的同一条新闻合并成事件，写过的自动排除；
+        # 配图过视觉模型判水印（pipeline/wx_wm.py）。雷达账本 articles/wx_events.json 随本轮 PR 一起提交。
+        # 公众号标题 / 链接只进 $PRIV（加密 artifact），公开日志只写数字。
+        # 雷达挂了不拦写稿：没配 secrets、同步失败都跳过，这一轮只用官网和 Wowhead。
+        continue-on-error: true
+        timeout-minutes: 20
+        env:
+          WX2RSS_URL: ${{ secrets.WX2RSS_URL }}
+          WX2RSS_TOKEN: ${{ secrets.WX2RSS_TOKEN }}
+          ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          WM_MODEL: ${{ vars.WM_MODEL || 'glm-5.3-flash' }}
+          WX_CACHE: ${{ runner.temp }}/wx-cache
+        run: |
+          set -uo pipefail
+          if [ ! -f articles/wx_fetch.py ]; then echo "内容仓库还没有 wx_fetch.py，跳过"; exit 0; fi
+          if [ -z "${WX2RSS_URL}" ] || [ -z "${WX2RSS_TOKEN}" ]; then
+            echo "::warning::没配 secrets.WX2RSS_URL / WX2RSS_TOKEN，本轮跳过公众号雷达"
+            exit 0
+          fi
+          rc=0
+          python articles/wx_fetch.py sync > "$PRIV/wx_radar.log" 2>&1 || rc=$?
+          if [ $rc -ne 0 ]; then
+            git checkout -q -- articles/wx_events.json 2>/dev/null || rm -f articles/wx_events.json
+            echo "::warning::公众号雷达同步失败（退出码 $rc），本轮只用官网和 Wowhead；详情见加密 artifact 里的 wx_radar.log"
+            exit 0
+          fi
+          WM_DEADLINE=600 python pipeline/wx_wm.py >> "$PRIV/wx_radar.log" 2>&1 || true
+          python articles/wx_fetch.py todo > "$PRIV/wx_todo.txt" 2>&1 || true
+          python articles/wx_fetch.py todo --json > "$PRIV/wx_todo.json" 2>/dev/null || true
+          python - "$PRIV/wx_todo.json" <<'EOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, sys
+          ev = [e for e in json.load(open("articles/wx_events.json", encoding="utf-8"))["events"] if e["ver"] == "无限"]
+          try:
+              todo = len(json.load(open(sys.argv[1], encoding="utf-8")))
+          except Exception:
+              todo = "?"
+          used = sum(1 for e in ev if e.get("used"))
+          print(f"公众号雷达：最近 2 天「无限」事件 {len(ev)} 个，写过自动排除 {used} 个，待 agent 处理 {todo} 个")
+          EOF
+
       - name: OpenCode agent
         if: env.FETCH_ONLY != 'true'
         timeout-minutes: 150
@@ -157,9 +199,11 @@ jobs:
             先 Read pipeline/gha-agent-brief.md 和 skills/wewrite/SKILL.md。
             wewrite 的 {home} = $WEWRITE_HOME = 仓库内 .wewrite/（style.yaml 已就位，来自 config/style.yaml），不要去 ~/.wewrite，不要走 onboard。
             临时文件放 pipeline/runs/ 或 .wewrite/ 下，不要写仓库外的目录。
-            选题只用两条通道：articles/bz_fetch.py（官方站，优先）和 articles/wh_fetch.py（Wowhead，官方没有的内容），各 list 一遍再定。不要用 websearch。
-            禁止 wewrite publish。没有未用新闻就结束、不要改无关文件。
-            只改工作区文件：articles/、pipeline/pending_publish.yaml、pipeline/runs/。
+            选题三条通道：articles/bz_fetch.py（官方站，优先）和 articles/wh_fetch.py（Wowhead，官方没有的内容）各 list 一遍；
+            articles/wx_fetch.py todo（公众号雷达：最近 2 天的「无限」事件，写过的已自动排除）逐个处理——单独成篇 / 并进速递 / 跳过，
+            都用 articles/wx_fetch.py mark 登记，收尾前 todo 必须为 0。公众号内容只当线索，按 brief 追原始出处。不要用 websearch。
+            禁止 wewrite publish。没有未用新闻、雷达 todo 也为 0 就结束，不要改无关文件。
+            只改工作区文件：articles/、pipeline/pending_publish.yaml、pipeline/runs/。articles/wx_events.json 是雷达账本，不要改。
             不要 git commit、不要 git push、不要开 PR；提交由后面的 workflow step 做。
         run: |
           set -euo pipefail
@@ -239,6 +283,15 @@ jobs:
           python3 tools/lint.py --changed
           GATE
           echo "闸门通过"
+          # 公众号雷达还剩几个事件 agent 没处理：只提醒、不拦 PR（拦了会连同已写好的稿一起丢），下一轮还会列出来
+          if [ -f articles/wx_fetch.py ] && [ -f articles/wx_events.json ]; then
+            python articles/wx_fetch.py todo --json > "$PRIV/wx_todo_after.json" 2>/dev/null || true
+            LEFT=$(python -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$PRIV/wx_todo_after.json" 2>/dev/null || echo "?")
+            if [ "$LEFT" != "0" ]; then
+              echo "::warning::公众号雷达还有 ${LEFT} 个「无限」事件 agent 没处理（不拦 PR，下一轮还会列出来）"
+              echo "公众号雷达：收尾时还有 ${LEFT} 个事件没处理" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
 
       - name: Encrypt and upload artifact
         if: always()
