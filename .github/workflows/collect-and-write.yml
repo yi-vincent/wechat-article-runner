@@ -395,12 +395,14 @@ jobs:
           cd "${GITHUB_WORKSPACE}" 2>/dev/null || exit 0
           mkdir -p _bundle
           [ -d "$PRIV" ] && cp -r "$PRIV" _bundle/logs
-          # 只打包本轮新增/改动的文件（整个 articles/images 有几十 MB），外加抓材料目录
+          # 只打包本轮新增/改动的文件（整个 articles/images 有几十 MB），外加抓材料目录和写稿临时文件
+          # （两者都在内容仓库的 .gitignore 里，git status 看不到，要单独加）
           git -c core.quotepath=off status --porcelain --untracked-files=all \
             | awk '$1 != "D" && $NF !~ /^_bundle\// {print $NF}' > _bundle/changed.txt
           echo _bundle > "${RUNNER_TEMP}/tarlist"
           cat _bundle/changed.txt >> "${RUNNER_TEMP}/tarlist"
           [ -d pipeline/materials ] && echo pipeline/materials >> "${RUNNER_TEMP}/tarlist"
+          [ -d pipeline/runs ] && echo pipeline/runs >> "${RUNNER_TEMP}/tarlist"
           mkdir -p "${RUNNER_TEMP}/out"
           tar czf - -T "${RUNNER_TEMP}/tarlist" 2>/dev/null \
             | openssl enc -aes-256-cbc -md sha256 -pbkdf2 -iter 200000 -salt -pass env:PASS \
@@ -446,7 +448,8 @@ jobs:
               p.write_text(json.dumps(json.loads(p.read_text(encoding="utf-8")), ensure_ascii=False, indent=2) + "\n",
                            encoding="utf-8")
           EOF
-          for pth in articles pipeline/pending_publish.yaml pipeline/runs pipeline/events; do
+          # pipeline/runs 是写稿临时文件，不入库（2026-10-08），只进上面的加密 artifact
+          for pth in articles pipeline/pending_publish.yaml pipeline/events; do
             [ -e "$pth" ] && git add "$pth"
           done
           if git diff --cached --quiet; then
