@@ -11,7 +11,7 @@ name: Collect and write
 
 on:
   # 不用 GitHub schedule（实测延迟 2–5 小时，高负载时整次跳过）。
-  # 由国内服务器按私有仓库 config/schedule.yaml 的时间（当前北京时间 10:45）调 API 触发（pipeline/daily_ops.py tick）。
+  # 由国内服务器按私有仓库 config/schedule.yaml 的时间（当前北京时间 07:00）调 API 触发（pipeline/daily_ops.py tick）。
   # 没有 schedule 也就不受「公开仓库 60 天无提交停用 schedule」的影响，不再需要 keepalive。
   workflow_dispatch:
     inputs:
