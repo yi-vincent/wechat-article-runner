@@ -232,6 +232,29 @@ jobs:
           EOF
           tail -n 1 "$GITHUB_STEP_SUMMARY" > "$PRIV/radar_summary.txt"
 
+      - name: NGA hot threads (clues)
+        id: nga
+        if: env.FETCH_ONLY != 'true'
+        # NGA 讨论热帖（私有仓库 articles/nga_hot.py）：读私有仓库 wow-news-collector 每小时记的回复数快照，
+        # 取过去 24 小时新增回复最多的帖，存进 .wewrite/nga-hot.json 给 agent 当线索（追原始出处，不当信源）。
+        # 读那个仓库用 NGA_REPO_TOKEN（fine-grained PAT，只授权 wow-news-collector，Contents: Read）；
+        # 没配就试 CONTENT_REPO_TOKEN（得把 wow-news-collector 也加进它的授权）。
+        # 帖子标题只进 $PRIV，公开日志只写数字。取不到就跳过，不拦写稿。
+        continue-on-error: true
+        timeout-minutes: 5
+        env:
+          NGA_REPO_TOKEN: ${{ secrets.NGA_REPO_TOKEN || secrets.CONTENT_REPO_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ ! -f articles/nga_hot.py ]; then echo "内容仓库还没有 nga_hot.py，跳过"; exit 0; fi
+          if python articles/nga_hot.py sync > "$PRIV/nga.log" 2>&1; then
+            tail -n 1 "$PRIV/nga.log" | tee -a "$GITHUB_STEP_SUMMARY"
+            cp .wewrite/nga-hot.json "$PRIV/" 2>/dev/null || true
+          else
+            echo "::warning::NGA 热帖快照取不到（没配 secrets.NGA_REPO_TOKEN，或 token 读不了 wow-news-collector），本轮不看 NGA；详情见加密 artifact 里的 nga.log"
+            echo "NGA 热帖：取不到快照，本轮跳过" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Wowhead and official site to-do (by version)
         id: channels
         if: env.FETCH_ONLY != 'true'
@@ -271,12 +294,13 @@ jobs:
             wewrite 的 {home} = $WEWRITE_HOME = 仓库内 .wewrite/（style.yaml 已就位，来自 config/style.yaml），不要去 ~/.wewrite，不要走 onboard。
             临时文件放 pipeline/runs/ 或 .wewrite/ 下，不要写仓库外的目录。
             选题三条通道都用 todo 逐条处理（版本：无限 / 正式服 / 经典60，外加源头判不出版本的「综合」，见 brief「内容版本」）：
-            articles/bz_fetch.py todo（官方站，优先）、articles/wh_fetch.py todo（Wowhead）、articles/wx_fetch.py todo（公众号雷达，写过的已自动排除）。
-            每条都要有着落：写进稿子 / 并进别篇 / 跳过（bz_fetch.py、wh_fetch.py、wx_fetch.py 各自的 mark 登记原因），收尾前三个 todo 都为 0。
+            articles/bz_fetch.py todo（官方站，优先）、articles/wh_fetch.py todo（Wowhead 新闻 + 蓝帖）、articles/wx_fetch.py todo（公众号雷达，写过的已自动排除）；
+            另有 articles/nga_hot.py todo（NGA 讨论热帖，只当线索：追到原始出处才写，见 brief ④）。
+            每条都要有着落：写进稿子 / 并进别篇 / 跳过（bz_fetch.py、wh_fetch.py、wx_fetch.py、nga_hot.py 各自的 mark 登记），收尾前四个 todo 都为 0。
             取不到全文等工具问题不要 mark，名额用完还值得写的也不要 mark，留到下一轮并在最终回复里写明。
             篇数：无限最多 MAX_ARTICLES 篇；正式服 + 经典60 另加最多 2 篇（config/versions.yaml 的 caps.others）。一篇只写一个版本，used_news 记 version。
             公众号内容只当线索，按 brief 追原始出处。不要用 websearch。
-            禁止 wewrite publish。三个 todo 都为 0 就结束，不要改无关文件。
+            禁止 wewrite publish。四个 todo 都为 0 就结束，不要改无关文件。
             只改工作区文件：articles/、pipeline/pending_publish.yaml、pipeline/runs/。articles/wx_events.json 是雷达账本，不要改。
             不要 git commit、不要 git push、不要开 PR；提交由后面的 workflow step 做。
         run: |
@@ -369,7 +393,16 @@ jobs:
               echo "公众号雷达：收尾时还有 ${LEFT} 个事件没处理" >> "$GITHUB_STEP_SUMMARY"
             fi
           fi
-          # Wowhead、国服官网还剩几条没处理（同样只提醒、不拦 PR；名额用完留到下一轮的也算在里面）
+          # NGA 热帖线索还剩几帖没处理（只提醒、不拦 PR）
+          if [ -f articles/nga_hot.py ]; then
+            python articles/nga_hot.py todo --json > "$PRIV/nga_todo_after.json" 2>/dev/null || true
+            LEFT=$(python -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$PRIV/nga_todo_after.json" 2>/dev/null || echo "?")
+            if [ "$LEFT" != "0" ]; then
+              echo "::warning::NGA 热帖还有 ${LEFT} 帖 agent 没处理（不拦 PR）"
+              echo "NGA 热帖：收尾时还有 ${LEFT} 帖没处理" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          fi
+          # Wowhead（含蓝帖）、国服官网还剩几条没处理（同样只提醒、不拦 PR；名额用完留到下一轮的也算在里面）
           if [ -f articles/versions.py ]; then
             for ch in wh bz; do
               python articles/${ch}_fetch.py todo --json > "$PRIV/${ch}_todo_after.json" 2>/dev/null || true
