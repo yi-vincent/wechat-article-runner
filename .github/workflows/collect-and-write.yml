@@ -61,7 +61,7 @@ jobs:
           set -euo pipefail
           PRIV="${RUNNER_TEMP}/private"
           mkdir -p "$PRIV"
-          date +%s > "$PRIV/t0"   # 飞书通知里的用时
+          date +%s > "$PRIV/t0"   # 通知里的用时
           miss=""
           [ -n "${CONTENT_REPO}" ] || miss="$miss vars.CONTENT_REPO"
           [ -n "${TOKEN}" ] || miss="$miss secrets.CONTENT_REPO_TOKEN"
@@ -515,18 +515,17 @@ jobs:
             exit 1
           fi
 
-      # 每轮都推一张飞书卡片（secrets.FEISHU_WEBHOOK；机器人开了签名校验再配 FEISHU_SIGN_SECRET）：
+      # 每轮都推一张企业微信卡片（secrets.NOTIFY_WEBHOOK = 自建 Message Pusher 的 webhook 地址；卡片放概况和失败项，点详情看完整内容）：
       #   ✅ 成功：新稿篇目和标题、PR、合并没有，外加官网 / 公众号雷达概况；没有新稿也报一声
       #   ⚠️ 跑完了但有提醒：自动合并失败、雷达同步失败或没处理完、水印处理出错
-      #   ❌ 失败：卡在哪一步，外加那一步日志的末尾 40 行
-      # 标题、日志都在 $PRIV，只进飞书，不进公开日志。卡片用私有仓库 HEAD 上的 pipeline/notify.py
+      #   ❌ 失败：卡在哪一步，外加那一步日志的末尾 200 行
+      # 标题、日志都在 $PRIV，只进企业微信，不进公开日志。消息用私有仓库 HEAD 上的 pipeline/notify.py
       # （git show，不跑 agent 可能动过的工作区版本）；checkout 都失败了就没有脚本，退回 curl 发一行纯文本。
       # 推送失败只记警告，不影响本次运行结果。
-      - name: Notify Feishu
+      - name: Notify WeCom
         if: always()
         env:
-          NOTIFY_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
-          FEISHU_SIGN_SECRET: ${{ secrets.FEISHU_SIGN_SECRET }}
+          NOTIFY_WEBHOOK: ${{ secrets.NOTIFY_WEBHOOK }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           RUN_NO: ${{ github.run_number }}
           JOB_STATUS: ${{ job.status }}
@@ -545,7 +544,7 @@ jobs:
         run: |
           set +e -uo pipefail
           if [ -z "${NOTIFY_WEBHOOK}" ]; then
-            echo "::warning::未配置 FEISHU_WEBHOOK，本轮结果没推飞书"
+            echo "::warning::未配置 NOTIFY_WEBHOOK，本轮结果没推企业微信"
             exit 0
           fi
           PRIV="${PRIV:-${RUNNER_TEMP}/private}"
@@ -556,7 +555,7 @@ jobs:
           item() {  # item fail|warn 键 标题 [日志…]
             local kind="$1" key="$2" title="$3" f; shift 3
             f="$N/$kind-$key.txt"
-            { echo "$title"; for x in "$@"; do [ -s "$x" ] && tail -n 40 "$x"; done; } > "$f"
+            { echo "$title"; for x in "$@"; do [ -s "$x" ] && tail -n 200 "$x"; done; } > "$f"
             if [ "$kind" = fail ]; then FAILS+=("$title"); else WARNS+=("$title"); fi
             ITEMS+=(--fail "$f")
           }
@@ -631,18 +630,16 @@ jobs:
               > "$N/send.log" 2>&1
             RC=$?
           else
-            jq -n --arg t "$TITLE"$'\n'"$RUN_URL" '{msg_type: "text", content: {text: $t}}' > "$N/msg.json"
-            if [ -n "${FEISHU_SIGN_SECRET}" ]; then
-              TS="$(date +%s)"
-              SIGN="$(printf '' | openssl dgst -sha256 -hmac "$(printf '%s\n%s' "$TS" "$FEISHU_SIGN_SECRET")" -binary | base64)"
-              jq --arg ts "$TS" --arg s "$SIGN" '. + {timestamp: $ts, sign: $s}' "$N/msg.json" > "$N/msg.signed" && mv "$N/msg.signed" "$N/msg.json"
-            fi
+            # 没有脚本：只发标题，详情页放运行记录链接
+            jq -n --arg t "$TITLE" --arg u "$RUN_URL" \
+              '{title: $t, description: "没拼成完整通知（私有仓库 checkout 失败？），点详情看运行记录", content: "[运行记录](\($u))"}' > "$N/msg.json"
             curl -sS -m 20 -H 'Content-Type: application/json' --data-binary @"$N/msg.json" "$NOTIFY_WEBHOOK" > "$N/send.log" 2>&1
-            grep -qE '"(code|StatusCode)":0' "$N/send.log"; RC=$?
+            grep -q '"success":true' "$N/send.log"; RC=$?
           fi
           if [ "$RC" -eq 0 ]; then
-            echo "已推送飞书"
+            echo "已推送企业微信"
           else
-            # send.log 只有飞书的返回码，不含内容
-            echo "::warning::飞书推送失败（$(grep -oE '"code":[0-9]+' "$N/send.log" | head -n 1)；19021 = 签名不对或没配 FEISHU_SIGN_SECRET，19024 = 缺机器人设的关键词）"
+            # send.log 里只有 Message Pusher 的返回（它自己的提示或企微 errmsg），不含内容；企微 errmsg 带服务器 IP，遮掉
+            WHY="$(grep -oE '"message":"[^"]*"' "$N/send.log" | head -n 1 | sed -E 's/from ip: [^ ,"]+/from ip: ***/')"
+            echo "::warning::企业微信推送失败（${WHY:-没有返回信息}；「Webhook 构建规则解析失败」= Message Pusher 里这个 webhook 的规则没配成原样透传）"
           fi
