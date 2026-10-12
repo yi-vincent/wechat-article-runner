@@ -295,11 +295,12 @@ jobs:
             临时文件放 pipeline/runs/ 或 .wewrite/ 下，不要写仓库外的目录。
             选题三条通道都用 todo 逐条处理（版本：无限 / 正式服 / 经典60，外加源头判不出版本的「综合」，见 brief「内容版本」）：
             articles/bz_fetch.py todo（官方站，优先）、articles/wh_fetch.py todo（Wowhead 新闻 + 蓝帖）、articles/wx_fetch.py todo（公众号雷达，写过的已自动排除）；
-            另有 articles/nga_hot.py todo（NGA 讨论热帖，只当线索：追到原始出处才写，见 brief ④）。
+            另有 articles/nga_hot.py todo（NGA 讨论热帖：有出处的追出处，玩家集中在吵的话题写成话题稿，见 brief ④）。
+            选题前先跑 python3 tools/source_mix.py --plan <本轮篇数>，按「选题来源配比」挑（Wowhead 45 / 公众号 25 / NGA 20 / 官方 10，7 天滚动，不硬凑）。
             每条都要有着落：写进稿子 / 并进别篇 / 跳过（bz_fetch.py、wh_fetch.py、wx_fetch.py、nga_hot.py 各自的 mark 登记），收尾前四个 todo 都为 0。
             取不到全文等工具问题不要 mark，名额用完还值得写的也不要 mark，留到下一轮并在最终回复里写明。
             篇数：无限最多 MAX_ARTICLES 篇；正式服 + 经典60 另加最多 2 篇（config/versions.yaml 的 caps.others）。一篇只写一个版本，used_news 记 version。
-            公众号内容只当线索，按 brief 追原始出处。不要用 websearch。
+            公众号和 NGA 帖子不当信源：追得到原始出处的按出处写；玩家在聊的现象写成话题稿，事实用官方 / Wowhead / 客户端核实，不改写对方内容（brief ③④）。不要用 websearch。
             禁止 wewrite publish。四个 todo 都为 0 就结束，不要改无关文件。
             只改工作区文件：articles/、pipeline/pending_publish.yaml、pipeline/runs/。articles/wx_events.json 是雷达账本，不要改。
             不要 git commit、不要 git push、不要开 PR；提交由后面的 workflow step 做。
