@@ -299,7 +299,7 @@ jobs:
             选题前先跑 python3 tools/source_mix.py --plan <本轮篇数>，按「选题来源配比」挑（Wowhead 45 / 公众号 25 / NGA 20 / 官方 10，7 天滚动，不硬凑）。
             每条都要有着落：写进稿子 / 并进别篇 / 跳过（bz_fetch.py、wh_fetch.py、wx_fetch.py、nga_hot.py 各自的 mark 登记），收尾前四个 todo 都为 0。
             取不到全文等工具问题不要 mark，名额用完还值得写的也不要 mark，留到下一轮并在最终回复里写明。
-            篇数：无限最多 MAX_ARTICLES 篇；正式服 + 经典60 另加最多 caps.others 篇（数字以 config/versions.yaml 为准，2026-10-18 起是 1；brief「本轮写几篇」）。一篇只写一个版本，used_news 记 version。
+            篇数：常规无限 caps.forever_normal 篇、正式服 + 经典60 另加 caps.others_normal 篇（config/versions.yaml，2026-10-21 起 2 + 1）；内容多时无限最多 MAX_ARTICLES 篇、正式服 + 经典60 最多 caps.others 篇，超过常规的每篇都要满足 brief「本轮写几篇」的加篇条件，最终回复写明凭哪条加的。一篇只写一个版本，used_news 记 version。
             公众号和 NGA 帖子不当信源：追得到原始出处的按出处写；玩家在聊的现象写成话题稿，事实用官方 / Wowhead / 客户端核实，不改写对方内容（brief ③④）。不要用 websearch。
             禁止 wewrite publish。四个 todo 都为 0 就结束，不要改无关文件。
             只改工作区文件：articles/、pipeline/pending_publish.yaml、pipeline/runs/。articles/wx_events.json 是雷达账本，不要改。
