@@ -362,7 +362,24 @@ jobs:
             exit 1
           fi
           # 3) 待推队列的摘要不超过 120 字（按字数，不是字节）
+          #    过去超长就整轮作废（2026-11-02 run 60、11-04 run 62 各丢一整轮新稿，因为 lint 不查、agent 无从自检）。
+          #    超长是机械问题、截短有确定解（检索词在开头，砍后半句），所以先让内容仓库的 tools/digest_fit.py 截短写回，
+          #    下面的 lint 照常核对检索词；工具不在（旧版内容仓库）或截完还超长，才按老规矩整轮拦下。
+          #    上限 120 在 tools/digest_fit.py（lint digest-length、publisher 预检共用），这里只在没有工具时才硬编码。
           echo "3-摘要超过 120 字" > "$PRIV/gate_step.txt"
+          if [ -f tools/digest_fit.py ]; then
+            if ! python3 tools/digest_fit.py --fix > "$PRIV/digest_fit.log" 2>&1; then
+              echo "3-摘要自动截短出错" > "$PRIV/gate_step.txt"
+              cat "$PRIV/digest_fit.log"
+              exit 1
+            fi
+            if [ -s "$PRIV/digest_fit.log" ]; then
+              echo "有摘要超过 120 字，已自动截短："
+              cat "$PRIV/digest_fit.log"
+              # 篇号 + 字数留给通知 / PR 正文（只有序号，没有标题和摘要正文）
+              echo "$(wc -l < "$PRIV/digest_fit.log" | tr -d ' ') 篇摘要超过 120 字，已自动截短（#$(grep -oE '第 [0-9]+ 篇' "$PRIV/digest_fit.log" | grep -oE '[0-9]+' | paste -sd ' ' - | sed 's/ / #/g')），截短后看一眼读着通不通" > "$PRIV/digest_trimmed.txt"
+            fi
+          fi
           python3 - <<'EOF'
           import sys, yaml
           d = yaml.safe_load(open("pipeline/pending_publish.yaml", encoding="utf-8")) or {}
@@ -384,6 +401,11 @@ jobs:
           python3 tools/lint.py --changed
           GATE
           echo "闸门通过"
+          # 摘要被自动截短过：公开日志只写篇数，篇号进通知 / PR 正文（私有）
+          if [ -s "$PRIV/digest_trimmed.txt" ]; then
+            echo "::warning::$(grep -oE '^[0-9]+ 篇摘要超过 120 字，已自动截短' "$PRIV/digest_trimmed.txt")（篇号见企业微信通知 / PR 正文）"
+            echo "摘要截短：$(grep -oE '^[0-9]+ 篇' "$PRIV/digest_trimmed.txt") 超过 120 字，闸门已自动截短" >> "$GITHUB_STEP_SUMMARY"
+          fi
           # 当天篇数下限（2026-10-26 用户定「每天至少 3 篇」）：used_news 里 used_at=今天的条数（撤稿不计），
           # 下限 = caps.forever_normal + caps.others_normal（config/versions.yaml，本机稿已在 main 上、一起计入）。
           # 不足只提醒不拦——拦了会连同已写好的稿一起丢；缺额由 agent 在最终回复交代，这里把数字顶进通知。
@@ -547,8 +569,11 @@ jobs:
           EOF
           )
           fi
-          BODY=$(printf '%s\n\n%s\n\n%s\n\n%s\n\n%s\n' \
+          TRIM=""
+          [ -s "$PRIV/digest_trimmed.txt" ] && TRIM="⚠️ $(cat "$PRIV/digest_trimmed.txt")"
+          BODY=$(printf '%s\n\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n' \
             "OpenCode 自动成稿，已过 tools/lint.py（规则见 rules/registry.yaml）。运行记录：${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            "${TRIM}" \
             "${LIST:-（无新稿，只有公众号雷达账本 / 处理记录）}" \
             "${RADAR}" \
             "${CHECKLIST}" \
@@ -634,6 +659,7 @@ jobs:
           fi
           [ -s "$PRIV/radar_left.txt" ] && item warn radar_left "⚠ $(cat "$PRIV/radar_left.txt")"
           [ -s "$PRIV/count_short.txt" ] && item warn count "⚠ $(cat "$PRIV/count_short.txt")"
+          [ -s "$PRIV/digest_trimmed.txt" ] && item warn digest_trim "⚠ $(cat "$PRIV/digest_trimmed.txt")"
           if [ "$S_WM" = failure ] || grep -q '^\[error\]' "$PRIV/watermark.log" 2>/dev/null; then
             grep '^\[error\]' "$PRIV/watermark.log" > "$N/wm.log" 2>/dev/null
             item warn wm "⚠ 部分图片水印处理失败，已用原图（可能仍带水印）" "$N/wm.log"
