@@ -33,7 +33,7 @@ on:
         type: boolean
         default: false
       mode:
-        description: "留空 = 常规写稿；radar = 白天加扫：只写公众号雷达里官方号 / 重点号的新事件；patch = 晚间补丁档：只写当天的热修 / 职业调整 / 规则改动。都是没有可写的就一篇不写"
+        description: "留空 = 常规写稿；radar = 白天加扫：只写公众号雷达里官方号 / 重点号的新事件；patch = 晚间补丁档：只写当天的热修 / 职业调整 / 规则改动；news = 白天新消息轮（每 90 分钟）：只写当天 07:00 之后新出的消息。都是没有可写的就一篇不写"
         type: string
         default: ""
 
@@ -56,6 +56,7 @@ jobs:
       MAX_ARTICLES: ${{ github.event_name == 'workflow_dispatch' && inputs.limit || vars.MAX_ARTICLES || '5' }}
       # radar = 服务器白天加扫触发的那几轮（私有仓库 config/schedule.yaml 的 radar，pipeline/daily_ops.py radar）
       # patch = 服务器每天 18:00 触发的晚间补丁档（schedule.yaml 的 patch，2026-11-17）；变量名沿用 RADAR_MODE
+      # news = 服务器白天 10:00–20:30 每 90 分钟触发的新消息轮（schedule.yaml 的 news，2026-11-18）
       RADAR_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || '' }}
       WEWRITE_HOME: ${{ github.workspace }}/.wewrite
     steps:
@@ -297,7 +298,7 @@ jobs:
 
             本轮：NEWS_ID=${{ env.NEWS_ID }}  MAX_ARTICLES=${{ env.MAX_ARTICLES }}  日期=${{ env.DAY }}  模式=${{ env.RADAR_MODE || '常规' }}
 
-            【模式=radar 时，这一段覆盖下面关于「四个 todo 清零」「篇数下限」「选题配比」的要求；模式=常规时忽略这一段】
+            【模式=radar 时，这一段覆盖下面关于「四个 todo 清零」「篇数下限」「选题配比」的要求；模式=常规 / patch / news 时忽略这一段】
             这是白天的公众号雷达加扫：官方号 / 重点号刚发了新文章。只做一件事——跑 python3 articles/wx_fetch.py todo --pri，
             逐个处理列出来的事件（官方号 / 重点号的），照 brief 雷达一节「先处理排在最前面的」「这类内容果断写」：
             追出处（wh_fetch.py list --all、蓝帖 todo、bz_fetch.py）→ 追到就按出处写成非头条短稿（500–700 字够了），当天早上那轮写过的同一件事不重写；
@@ -306,12 +307,20 @@ jobs:
             不凑篇数：没有值得写的就一篇不写，直接结束；篇数下限、选题配比、速递都不适用；最多写 MAX_ARTICLES 篇。
             新稿的 used_news note 里写「雷达加扫」，不标「本批头条」。
 
-            【模式=patch 时，这一段覆盖下面关于「四个 todo 清零」「篇数下限」「选题配比」的要求；模式=常规 / radar 时忽略这一段】
+            【模式=patch 时，这一段覆盖下面关于「四个 todo 清零」「篇数下限」「选题配比」的要求；模式=常规 / radar / news 时忽略这一段】
             这是晚间补丁档：只收早上那轮之后才发出来的热修 / 职业调整 / 规则改动，照 brief「补丁资讯」一节里「晚间补丁档」那一段做。
             跑 python3 articles/wh_fetch.py todo、python3 articles/bz_fetch.py todo、python3 articles/wx_fetch.py todo --pri，只挑补丁类条目；
             有就写 1 篇补丁资讯把它们收全（最多 MAX_ARTICLES 篇），非头条，used_news 写 news_type: patch、note 写「晚间补丁档」；
             当天早上已写过补丁资讯的，只有新条目不止一两条小修才再写；没有补丁类条目或只有一两条小修就一篇不写，直接结束。
             其余条目一律不碰、不 mark，留给明早那轮；篇数下限、选题配比、速递、凑缺顺位都不适用。
+
+            【模式=news 时，这一段覆盖下面关于「四个 todo 清零」「篇数下限」「选题配比」的要求；模式=常规 / radar / patch 时忽略这一段】
+            这是白天的新消息轮（每 90 分钟一次）：只写今天 07:00（北京时间）之后才发出来的新消息，照 brief「白天新消息轮」一节做。
+            跑 python3 articles/wh_fetch.py todo、python3 articles/bz_fetch.py todo、python3 articles/wx_fetch.py todo --pri，只看发布时间在今天 07:00 之后的条目：
+            补丁类（热修 / 职业调整 / 规则改动）照 brief「补丁资讯」写，news_type: patch；官方公告、Wowhead 新闻、蓝帖、官方号 / 重点号事件里读者今天就用得上的，写成非头条短稿（500–700 字够了）。
+            今天前面几轮写过的同一件事不重写（先看 used_news.yaml 里 used_at 是今天的条目）；纯消息、题小的、今天用不上的一律不碰、不 mark，留给明早那轮并速递。
+            今天账本里已有 6 篇及以上时只写补丁类。不凑篇数：没有可写的就一篇不写，直接结束；篇数下限、选题配比、速递、凑缺顺位、NGA 热帖都不适用；最多写 MAX_ARTICLES 篇。
+            新稿的 used_news note 里写「白天新消息轮」，不标「本批头条」。
 
             先 Read pipeline/gha-agent-brief.md 和 skills/wewrite/SKILL.md。
             wewrite 的 {home} = $WEWRITE_HOME = 仓库内 .wewrite/（style.yaml 已就位，来自 config/style.yaml），不要去 ~/.wewrite，不要走 onboard。
@@ -443,7 +452,7 @@ jobs:
           print(n, floor)
           EOF
             read -r N FLOOR < "$PRIV/count.txt"
-            if [ -z "${RADAR_MODE:-}" ] && [ "${N:-0}" -lt "${FLOOR:-3}" ]; then   # 加扫、晚间补丁档不查下限
+            if [ -z "${RADAR_MODE:-}" ] && [ "${N:-0}" -lt "${FLOOR:-3}" ]; then   # 加扫、晚间补丁档、白天新消息轮不查下限
               MSG="今天（${DAY}）账本只有 ${N} 篇，少于硬下限 ${FLOOR} 篇（缺 $((FLOOR - N)) 篇）"
               echo "::warning::${MSG}"
               echo "篇数下限：${MSG}" >> "$GITHUB_STEP_SUMMARY"
@@ -712,7 +721,7 @@ jobs:
                 *)       [ "$NO_PR" = true ] && echo "**新稿 ${K} 篇**，只跑不交付：没推分支、没开 PR" ;;
               esac
             fi
-            case "${RADAR_MODE:-}" in radar) ML="雷达加扫 · " ;; patch) ML="晚间补丁档 · " ;; *) ML="" ;; esac
+            case "${RADAR_MODE:-}" in radar) ML="雷达加扫 · " ;; patch) ML="晚间补丁档 · " ;; news) ML="白天新消息轮 · " ;; *) ML="" ;; esac
             echo "${ML}篇数上限 ${MAX_ARTICLES:-默认}${NEWS_ID:+ · 指定新闻 ${NEWS_ID}}${T:+ · 用时 $((T / 60))m$((T % 60))s}"
             [ -s "$PRIV/count_short.txt" ] && echo "- ⚠️ $(cat "$PRIV/count_short.txt")"
           } > "$N/summary.md"
