@@ -763,7 +763,15 @@ jobs:
           [ "$S_FETCH" = failure ] && item fail fetch "✗ 抓材料失败" "$PRIV/fetch.log"
           [ "$S_CN" = failure ] && item fail cn "✗ 国服官网抓取失败，本轮没写稿" "$PRIV/cn.log"
           [ "$S_OC_INSTALL" = failure ] && item fail oc_install "✗ 安装 OpenCode 失败" "$PRIV/opencode-install.log"
-          [ "$S_AGENT" = failure ] && item fail agent "✗ OpenCode 写稿失败或超时" "$PRIV/opencode.log"
+          if [ "$S_AGENT" = failure ]; then
+            # 模型额度用完（智谱 5 小时上限）单独报清楚：稿写到一半全丢，重置后再点一次「写这篇」或等下一轮（2026-11-26 run 153 首例）
+            RESET=$(grep -o "限额将在 [0-9T:-]* [0-9:]* 重置" "$PRIV/opencode.log" 2>/dev/null | tail -1 | sed -E 's/限额将在 (.*) 重置/\1/')
+            if grep -q "使用上限" "$PRIV/opencode.log" 2>/dev/null; then
+              item fail agent "✗ 模型额度用完（5 小时上限，${RESET:-重置时间见日志} 重置），本轮稿没写成；重置后再点「写这篇」或等下一轮" "$PRIV/opencode.log"
+            else
+              item fail agent "✗ OpenCode 写稿失败或超时" "$PRIV/opencode.log"
+            fi
+          fi
           [ "$S_GATE" = failure ] && item fail gate "✗ 闸门未过：$(cat "$PRIV/gate_step.txt" 2>/dev/null || echo 未知)，没开 PR" "$PRIV/gate.log"
           [ "$S_PR" = failure ] && item fail pr "✗ 推分支 / 开 PR 失败" "$PRIV/push.err" "$PRIV/pr.err"
           if [ "$JOB_STATUS" = failure ] && [ ${#FAILS[@]} -eq 0 ]; then
