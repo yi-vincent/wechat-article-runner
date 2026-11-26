@@ -480,8 +480,25 @@ jobs:
               ALL=$(python -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$PRIV/wx_todo_all.json" 2>/dev/null || echo "0")
               if [ "$LEFT" != "?" ] && [ "$ALL" -gt "$LEFT" ] 2>/dev/null; then
                 echo "公众号雷达：另有 $((ALL - LEFT)) 个事件不在本轮范围（普通自媒体号 / 今天 07:00 前发的），留给明早 07:00 那轮" >> "$GITHUB_STEP_SUMMARY"
+                # 通知详情页列出标题（2026-11-26 用户要「至少让我看到有哪些内容可以发」；通知是私有的，标题可以带，链接不带）
+                python - "$PRIV/wx_todo_all.json" "$PRIV/wx_todo_after.json" > "$PRIV/radar_deferred.txt" 2>/dev/null <<'EOF' || true
+          import json, sys
+          allv = json.load(open(sys.argv[1], encoding="utf-8"))
+          try:
+              inscope = {e["id"] for e in json.load(open(sys.argv[2], encoding="utf-8"))}
+          except Exception:
+              inscope = set()
+          rest = [e for e in allv if e["id"] not in inscope]
+          if rest:
+              print("留给明早 07:00 那轮的雷达事件 %d 个（本轮只看官方号 / 重点号、今天 07:00 后发的）：" % len(rest))
+              for e in rest:
+                  print("- [%s · %d 个号] %s" % (e.get("ver"), e.get("accounts", 0), e.get("title")))
+          EOF
               fi
             fi
+            # 留库存的题（mark --later 记的）每轮都列进通知，让人看到有哪些题可以写
+            python articles/wx_fetch.py backlog > "$PRIV/radar_backlog.txt" 2>/dev/null || true
+            grep -q '^共 ' "$PRIV/radar_backlog.txt" 2>/dev/null || : > "$PRIV/radar_backlog.txt"
           fi
           # NGA 热帖线索还剩几帖没处理（只提醒、不拦 PR）
           if [ -f articles/nga_hot.py ]; then
@@ -607,10 +624,10 @@ jobs:
                  if (r.get("event"), r.get("at")) not in seen]
           if new:
               c = collections.Counter(r.get("how") for r in new)
-              print("### 公众号雷达：本轮处理 %d 个事件（单独成篇 %d / 并进速递 %d / 跳过 %d）"
-                    % (len(new), c["written"], c["digest"], c["skip"]))
+              print("### 公众号雷达：本轮处理 %d 个事件（单独成篇 %d / 并进速递或补丁资讯 %d / 留库存 %d / 跳过 %d）"
+                    % (len(new), c["written"], c["digest"], c["later"], c["skip"]))
               for r in new:
-                  how = {"written": "成篇 #%s" % r.get("no"), "digest": "速递 #%s" % r.get("no")}.get(r.get("how"), "跳过")
+                  how = {"written": "成篇 #%s" % r.get("no"), "digest": "并进 #%s" % r.get("no"), "later": "留库存"}.get(r.get("how"), "跳过")
                   print("- %s ｜ %s%s" % (r.get("title"), how, "：" + r["why"] if r.get("why") else ""))
           EOF
           )
@@ -721,6 +738,9 @@ jobs:
             echo "$(basename "$f" | cut -d- -f1) · $(head -n 1 "$f" | sed -E 's/^#+[[:space:]]*//')" >> "$N/articles.txt"
           done < "$PRIV/new_articles.txt"
           cat "$PRIV/cn_summary.txt" "$PRIV/radar_summary.txt" > "$N/context.txt" 2>/dev/null
+          for f in "$PRIV/radar_backlog.txt" "$PRIV/radar_deferred.txt"; do
+            [ -s "$f" ] && { echo; cat "$f"; } >> "$N/context.txt"
+          done
 
           T=""; [ -s "$PRIV/t0" ] && T=$(( $(date +%s) - $(cat "$PRIV/t0") ))
           {
