@@ -309,14 +309,14 @@ jobs:
 
             【模式=patch 时，这一段覆盖下面关于「四个 todo 清零」「篇数下限」「选题配比」的要求；模式=常规 / radar / news 时忽略这一段】
             这是晚间补丁档：只收早上那轮之后才发出来的热修 / 职业调整 / 规则改动，照 brief「补丁资讯」一节里「晚间补丁档」那一段做。
-            跑 python3 articles/wh_fetch.py todo、python3 articles/bz_fetch.py todo、python3 articles/wx_fetch.py todo --pri，只挑补丁类条目；
+            跑 python3 articles/wh_fetch.py todo、python3 articles/bz_fetch.py todo、python3 articles/wx_fetch.py todo --pri --after ${{ env.DAY }}T07:00，只挑补丁类条目；
             有就写 1 篇补丁资讯把它们收全（最多 MAX_ARTICLES 篇），非头条，used_news 写 news_type: patch、note 写「晚间补丁档」；
             当天早上已写过补丁资讯的，只有新条目不止一两条小修才再写；没有补丁类条目或只有一两条小修就一篇不写，直接结束。
             其余条目一律不碰、不 mark，留给明早那轮；篇数下限、选题配比、速递、凑缺顺位都不适用。
 
             【模式=news 时，这一段覆盖下面关于「四个 todo 清零」「篇数下限」「选题配比」的要求；模式=常规 / radar / patch 时忽略这一段】
             这是白天的新消息轮（每 90 分钟一次）：只写今天 07:00（北京时间）之后才发出来的新消息，照 brief「白天新消息轮」一节做。
-            跑 python3 articles/wh_fetch.py todo、python3 articles/bz_fetch.py todo、python3 articles/wx_fetch.py todo --pri，只看发布时间在今天 07:00 之后的条目：
+            跑 python3 articles/wh_fetch.py todo、python3 articles/bz_fetch.py todo、python3 articles/wx_fetch.py todo --pri --after ${{ env.DAY }}T07:00，只看发布时间在今天 07:00 之后的条目：
             补丁类（热修 / 职业调整 / 规则改动）照 brief「补丁资讯」写，news_type: patch；官方公告、Wowhead 新闻、蓝帖、官方号 / 重点号事件里读者今天就用得上的，写成非头条短稿（500–700 字够了）。
             今天前面几轮写过的同一件事不重写（先看 used_news.yaml 里 used_at 是今天的条目）；纯消息、题小的、今天用不上的一律不碰、不 mark，留给明早那轮并速递。
             今天账本里已有 6 篇及以上时只写补丁类。不凑篇数：没有可写的就一篇不写，直接结束；篇数下限、选题配比、速递、凑缺顺位、NGA 热帖都不适用；最多写 MAX_ARTICLES 篇。
@@ -460,13 +460,27 @@ jobs:
             fi
           fi
           # 公众号雷达还剩几个事件 agent 没处理：只提醒、不拦 PR（拦了会连同已写好的稿一起丢），下一轮还会列出来
+          # 白天各轮只数自己范围内的事件（2026-11-26 用户定）：radar = 官方号 / 重点号；news / patch = 官方号 / 重点号且今天 07:00 后发的。
+          # 其余事件按 brief 留给明早 07:00 那轮，不算「没处理」，只在 summary 里记一句——此前按全量数，news 轮每 90 分钟报一次误报。
           if [ -f articles/wx_fetch.py ] && [ -f articles/wx_events.json ]; then
-            python articles/wx_fetch.py todo --json > "$PRIV/wx_todo_after.json" 2>/dev/null || true
+            case "${RADAR_MODE:-}" in
+              radar) SCOPE=(--pri) ;;
+              news|patch) SCOPE=(--pri --after "${DAY}T07:00") ;;
+              *) SCOPE=() ;;
+            esac
+            python articles/wx_fetch.py todo --json "${SCOPE[@]}" > "$PRIV/wx_todo_after.json" 2>/dev/null || true
             LEFT=$(python -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$PRIV/wx_todo_after.json" 2>/dev/null || echo "?")
             if [ "$LEFT" != "0" ]; then
               echo "公众号雷达还有 ${LEFT} 个事件 agent 没处理（不拦 PR，下一轮还会列出来）" > "$PRIV/radar_left.txt"
               echo "::warning::公众号雷达还有 ${LEFT} 个事件 agent 没处理（不拦 PR，下一轮还会列出来）"
               echo "公众号雷达：收尾时还有 ${LEFT} 个事件没处理" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            if [ -n "${RADAR_MODE:-}" ]; then
+              python articles/wx_fetch.py todo --json > "$PRIV/wx_todo_all.json" 2>/dev/null || true
+              ALL=$(python -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$PRIV/wx_todo_all.json" 2>/dev/null || echo "0")
+              if [ "$LEFT" != "?" ] && [ "$ALL" -gt "$LEFT" ] 2>/dev/null; then
+                echo "公众号雷达：另有 $((ALL - LEFT)) 个事件不在本轮范围（普通自媒体号 / 今天 07:00 前发的），留给明早 07:00 那轮" >> "$GITHUB_STEP_SUMMARY"
+              fi
             fi
           fi
           # NGA 热帖线索还剩几帖没处理（只提醒、不拦 PR）
