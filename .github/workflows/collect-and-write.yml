@@ -33,7 +33,11 @@ on:
         type: boolean
         default: false
       mode:
-        description: "留空 = 常规写稿；radar = 白天加扫：只写公众号雷达里官方号 / 重点号的新事件；patch = 晚间补丁档：只写当天的热修 / 职业调整 / 规则改动；news = 白天新消息轮（每 90 分钟）：只写当天 07:00 之后新出的消息。都是没有可写的就一篇不写"
+        description: "留空 = 常规写稿；radar = 白天加扫：只写公众号雷达里官方号 / 重点号的新事件；patch = 晚间补丁档：只写当天的热修 / 职业调整 / 规则改动；news = 白天新消息轮（每 90 分钟）：只写当天 07:00 之后新出的消息；pick = 点名写稿：只写 pick 指定的那一个雷达事件 / 库存题。都是没有可写的就一篇不写"
+        type: string
+        default: ""
+      pick:
+        description: "mode=pick 时写哪一个：公众号雷达的事件 ID（wx_fetch.py todo / backlog 里的 eMMDDHHMM-xxxx）。通知里的「写这篇」按钮经 pipeline/pickbot 传进来"
         type: string
         default: ""
 
@@ -58,6 +62,8 @@ jobs:
       # patch = 服务器每天 18:00 触发的晚间补丁档（schedule.yaml 的 patch，2026-11-17）；变量名沿用 RADAR_MODE
       # news = 服务器白天 10:00–20:30 每 90 分钟触发的新消息轮（schedule.yaml 的 news，2026-11-18）
       RADAR_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || '' }}
+      # pick = 通知里「写这篇」按钮触发的点名写稿（私有仓库 pipeline/pickbot，2026-11-26）：只写 PICK_EVENT 这一个事件 / 库存题
+      PICK_EVENT: ${{ github.event_name == 'workflow_dispatch' && inputs.pick || '' }}
       WEWRITE_HOME: ${{ github.workspace }}/.wewrite
     steps:
       - name: Preflight
@@ -322,6 +328,15 @@ jobs:
             今天账本里已有 6 篇及以上时只写补丁类。不凑篇数：没有可写的就一篇不写，直接结束；篇数下限、选题配比、速递、凑缺顺位、NGA 热帖都不适用；最多写 MAX_ARTICLES 篇。
             新稿的 used_news note 里写「白天新消息轮」，不标「本批头条」。
 
+            【模式=pick 时，这一段覆盖下面关于「四个 todo 清零」「篇数下限」「选题配比」的要求；模式=常规 / radar / patch / news 时忽略这一段】
+            这是点名写稿：用户在通知里点了「写这篇」，只写公众号雷达事件 ${{ env.PICK_EVENT }} 这一个题，照 brief「点名写稿」一节做。
+            先在 python3 articles/wx_fetch.py backlog --json（留库存的题，带标题和「为什么留」）或 python3 articles/wx_fetch.py todo --json 里找这个 ID；
+            库存行的「为什么留」写的就是要写成什么题、要核实什么。按 brief ③ 第 4 条两问写：几万人要做的决定 → 攻略 / 对照表；
+            读者今天就用得上的消息 → 非头条短稿；事实全部用 Wowhead 指南库、客户端数据（wago_terms.py）、官方信息核实，核实不了的数值不写，
+            不用对方正文和图、不写号名。写完 python3 articles/wx_fetch.py mark <事件ID> --written NN。
+            只写这一篇（MAX_ARTICLES=1），不是头条，used_news note 写「点名写稿」；核实后发现写不成（查不到一手材料、已写过 #NN）就一篇不写，
+            mark --skip 写明原因，并在最终回复里说清楚。其余四个 todo 一律不碰、不 mark；篇数下限、选题配比、速递、凑缺顺位都不适用。
+
             先 Read pipeline/gha-agent-brief.md 和 skills/wewrite/SKILL.md。
             wewrite 的 {home} = $WEWRITE_HOME = 仓库内 .wewrite/（style.yaml 已就位，来自 config/style.yaml），不要去 ~/.wewrite，不要走 onboard。
             临时文件放 pipeline/runs/ 或 .wewrite/ 下，不要写仓库外的目录。
@@ -371,6 +386,10 @@ jobs:
       - name: Gate - paths and article checks
         id: gate
         if: env.FETCH_ONLY != 'true'
+        env:
+          # 通知里「写这篇」链接（私有仓库 pipeline/pickbot，2026-11-26）：两个都配了才出链接
+          PICK_URL: ${{ vars.PICK_URL }}
+          PICK_SECRET: ${{ secrets.PICK_SECRET }}
         run: |
           find articles/images -name "*.wmtmp" -delete 2>/dev/null || true
           # 闸门逻辑与此前在私有仓库时相同；输出含文件名和正文片段，全部进 gate.log
@@ -470,6 +489,7 @@ jobs:
             esac
             python articles/wx_fetch.py todo --json "${SCOPE[@]}" > "$PRIV/wx_todo_after.json" 2>/dev/null || true
             LEFT=$(python -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$PRIV/wx_todo_after.json" 2>/dev/null || echo "?")
+            [ "${RADAR_MODE:-}" = pick ] && LEFT=0   # 点名写稿只管那一篇，不报雷达剩余
             if [ "$LEFT" != "0" ]; then
               echo "公众号雷达还有 ${LEFT} 个事件 agent 没处理（不拦 PR，下一轮还会列出来）" > "$PRIV/radar_left.txt"
               echo "::warning::公众号雷达还有 ${LEFT} 个事件 agent 没处理（不拦 PR，下一轮还会列出来）"
@@ -499,6 +519,40 @@ jobs:
             # 留库存的题（mark --later 记的）每轮都列进通知，让人看到有哪些题可以写
             python articles/wx_fetch.py backlog > "$PRIV/radar_backlog.txt" 2>/dev/null || true
             grep -q '^共 ' "$PRIV/radar_backlog.txt" 2>/dev/null || : > "$PRIV/radar_backlog.txt"
+            # 候选题带「写这篇」链接（2026-11-26 用户定「做按钮版」）：库存题 + 本轮没处理的事件，点了经 pipeline/pickbot 触发 mode=pick 单写那一篇。
+            # 链接带 HMAC 签名不带密钥；PICK_URL（runner 仓库 Variables）/ PICK_SECRET（Secrets）没配就不出这一段。
+            if [ -n "${PICK_URL:-}" ] && [ -n "${PICK_SECRET:-}" ] && [ -f pipeline/pickbot/app.py ]; then
+              python - "$PRIV/wx_todo_all.json" "$PRIV/wx_todo_after.json" > "$PRIV/picks.md" 2>/dev/null <<'EOF' || true
+          import json, os, subprocess, sys
+          sys.path.insert(0, "pipeline/pickbot")
+          from app import make_link
+          base, secret = os.environ["PICK_URL"], os.environ["PICK_SECRET"]
+          def load(p):
+              try:
+                  return json.load(open(p, encoding="utf-8"))
+              except Exception:
+                  return []
+          rows = []
+          try:
+              bl = json.loads(subprocess.run([sys.executable, "articles/wx_fetch.py", "backlog", "--json"], capture_output=True, text=True).stdout or "[]")
+          except Exception:
+              bl = []
+          for h in bl:
+              rows.append(("库存", h["event"], h.get("ver") or "", h.get("title", ""), h.get("why", "")))
+          seen = {r[1] for r in rows}
+          for e in load(sys.argv[1]) or load(sys.argv[2]):
+              if e["id"] in seen:
+                  continue
+              rows.append(("待处理", e["id"], e.get("ver") or "", e.get("title", ""), "%d 个号在发" % e.get("accounts", 0)))
+          if rows:
+              print("**可以点名写的题（点「写这篇」→ runner 单写那一篇，约 20–30 分钟出草稿）**  ")
+              for kind, eid, ver, title, why in rows[:20]:
+                  t = title.replace("[", "［").replace("]", "］")
+                  print("- %s · %s · %s —— %s ［[写这篇](%s)］  " % (kind, ver, t, why.replace("\n", " ")[:80], make_link(base, secret, eid, title)))
+              if len(rows) > 20:
+                  print("- …还有 %d 个没列" % (len(rows) - 20))
+          EOF
+            fi
           fi
           # NGA 热帖线索还剩几帖没处理（只提醒、不拦 PR）
           if [ -f articles/nga_hot.py ]; then
@@ -741,6 +795,7 @@ jobs:
           for f in "$PRIV/radar_backlog.txt" "$PRIV/radar_deferred.txt"; do
             [ -s "$f" ] && { echo; cat "$f"; } >> "$N/context.txt"
           done
+          PICKS=(); [ -s "$PRIV/picks.md" ] && PICKS=(--md "$PRIV/picks.md")
 
           T=""; [ -s "$PRIV/t0" ] && T=$(( $(date +%s) - $(cat "$PRIV/t0") ))
           {
@@ -755,7 +810,7 @@ jobs:
                 *)       [ "$NO_PR" = true ] && echo "**新稿 ${K} 篇**，只跑不交付：没推分支、没开 PR" ;;
               esac
             fi
-            case "${RADAR_MODE:-}" in radar) ML="雷达加扫 · " ;; patch) ML="晚间补丁档 · " ;; news) ML="白天新消息轮 · " ;; *) ML="" ;; esac
+            case "${RADAR_MODE:-}" in radar) ML="雷达加扫 · " ;; patch) ML="晚间补丁档 · " ;; news) ML="白天新消息轮 · " ;; pick) ML="点名写稿 ${PICK_EVENT:-} · " ;; *) ML="" ;; esac
             echo "${ML}篇数上限 ${MAX_ARTICLES:-默认}${NEWS_ID:+ · 指定新闻 ${NEWS_ID}}${T:+ · 用时 $((T / 60))m$((T % 60))s}"
             [ -s "$PRIV/count_short.txt" ] && echo "- ⚠️ $(cat "$PRIV/count_short.txt")"
           } > "$N/summary.md"
@@ -776,7 +831,7 @@ jobs:
 
           if git show HEAD:pipeline/notify.py > "$N/notify.py" 2>/dev/null; then
             python3 "$N/notify.py" --title "$TITLE" --color "$COLOR" \
-              --md "$N/summary.md" --text "$N/articles.txt" --text "$N/context.txt" "${ITEMS[@]}" "${BUTTONS[@]}" \
+              --md "$N/summary.md" --text "$N/articles.txt" --text "$N/context.txt" "${PICKS[@]}" "${ITEMS[@]}" "${BUTTONS[@]}" \
               > "$N/send.log" 2>&1
             RC=$?
           else
